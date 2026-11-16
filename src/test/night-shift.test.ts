@@ -46,3 +46,23 @@ describe("night shift window and overnight workday", () => {
     expect(isoToIstDateTimeInput(iso)).toBe("2026-11-17T01:30");
   });
 });
+
+describe("handover window", () => {
+  it("stays in the post-shift phase for two hours, then counts down", () => {
+    expect(getShiftState(atIST("2026-11-17T05:29:59"))).toBe("after");
+    expect(getShiftState(atIST("2026-11-17T05:30:00"))).toBe("before");
+    expect(getShiftState(atIST("2026-11-17T09:49:00"))).toBe("before");
+  });
+});
+
+import { istGapHours, nextGapChange } from "@/lib/night-shift";
+
+describe("DST guardian", () => {
+  it("reports the IST gap to New York and the upcoming change", () => {
+    expect(istGapHours(new Date("2026-11-16T12:00:00Z"), "America/New_York")).toBe(10.5);
+    expect(istGapHours(new Date("2026-07-16T12:00:00Z"), "America/New_York")).toBe(9.5);
+    const change = nextGapChange(new Date("2027-03-01T12:00:00Z"), "America/New_York", 21);
+    expect(change).toMatchObject({ from: 10.5, to: 9.5 });
+    expect(nextGapChange(new Date("2026-11-16T12:00:00Z"), "America/New_York", 21)).toBeNull();
+  });
+});

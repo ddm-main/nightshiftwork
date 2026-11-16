@@ -138,8 +138,8 @@ export async function saveShift(userId: string, shiftId: string, changes: Partia
   if (error) throw new Error(error.message);
 }
 
-export async function uploadEvidence(userId: string, shiftId: string | null, taskId: string | null, file: File): Promise<Attachment> {
-  const bucket = "task-evidence";
+export async function uploadEvidence(userId: string, shiftId: string | null, taskId: string | null, file: File, options: { bucket?: "task-evidence" | "meeting-assets" | "shift-reports"; meetingId?: string | null } = {}): Promise<Attachment> {
+  const bucket = options.bucket ?? "task-evidence";
   const objectPath = `${userId}/${shiftId ?? "unassigned"}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
   const { error: uploadError } = await supabase.storage.from(bucket).upload(objectPath, file, { contentType: file.type || "image/png", upsert: false });
   if (uploadError) throw new Error(uploadError.message);
@@ -147,6 +147,7 @@ export async function uploadEvidence(userId: string, shiftId: string | null, tas
     user_id: userId,
     shift_id: shiftId,
     task_id: taskId,
+    meeting_id: options.meetingId ?? null,
     bucket_id: bucket,
     object_path: objectPath,
     file_name: file.name || "pasted-evidence.png",
@@ -179,4 +180,24 @@ export function taskStatusChanges(status: TaskStatus): TaskChanges {
     status,
     ...(status === "done" ? { completed_at: new Date().toISOString() } : { completed_at: null }),
   };
+}
+export async function uploadReport(userId: string, shiftId: string, fileName: string, text: string): Promise<void> {
+  const file = new File([text], fileName, { type: "text/markdown" });
+  const { error } = await supabase.storage.from("shift-reports").upload(`${userId}/${shiftId}/${fileName}`, file, { contentType: "text/markdown", upsert: true });
+  if (error) throw new Error(error.message);
+}
+
+export async function removeMeeting(userId: string, meetingId: string): Promise<void> {
+  const { error } = await supabase.from("meetings").delete().eq("id", meetingId).eq("user_id", userId);
+  if (error) throw new Error(error.message);
+}
+
+export async function removeTemplate(userId: string, templateId: string): Promise<void> {
+  const { error } = await supabase.from("workflow_templates").delete().eq("id", templateId).eq("user_id", userId);
+  if (error) throw new Error(error.message);
+}
+
+export async function saveTemplate(userId: string, templateId: string, changes: Partial<Pick<import("@/lib/tracker-types").WorkflowTemplate, "name" | "steps" | "project_id">>): Promise<void> {
+  const { error } = await supabase.from("workflow_templates").update(changes).eq("id", templateId).eq("user_id", userId);
+  if (error) throw new Error(error.message);
 }

@@ -1,27 +1,42 @@
 import { createFileRoute } from "@tanstack/react-router";
 import {
-  AlarmClock, ArrowDownToLine, ArrowLeftRight, ArrowRight, Archive, CalendarDays, Check,
-  CheckCircle2, ChevronDown, ChevronRight, Clipboard, Clock3, Coffee, Command, Copy, CornerDownLeft,
-  ExternalLink, FileImage, Focus, FolderKanban, History, ImagePlus, ListChecks, LoaderCircle, LockKeyhole,
-  LogOut, Mail, Moon, MoreHorizontal, Pause, Play, Plus, Search, Send, Settings2, ShieldCheck,
-  Sparkles, Sun, Timer, Trash2, Upload, Users, WandSparkles, X,
+  ArrowDownToLine, ArrowLeftRight, ArrowRight, Archive, CalendarDays, Check,
+  CheckCircle2, ChevronDown, Clipboard, Clock3, Command, Copy, Download,
+  FileImage, FolderKanban, Pencil, ImagePlus, ListChecks, LoaderCircle, LockKeyhole,
+  LogOut, Pause, Play, Plus, Search, ShieldCheck,
+  Sparkles, Trash2, Upload, Users, 
+  Activity, Bell, SlidersHorizontal,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { toast } from "sonner";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Toaster, toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { ClockMenu } from "@/components/clock-menu";
+import { MeetingDialog, MeetingsSection } from "@/components/meetings-section";
+import { PlanBoard } from "@/components/plan-board";
+import { PreferencesDialog } from "@/components/preferences";
+import { ProjectsSection } from "@/components/projects-section";
+import { TaskEditDialog, type TaskEdit } from "@/components/task-dialogs";
+import { DEFAULT_PREFS, loadPrefs, savePrefs, type Prefs } from "@/lib/prefs";
+import { plannedDateFor } from "@/lib/plan";
+import { runningSeconds, totalSeconds } from "@/lib/timers";
+import { BUCKET_COPY, BUCKET_OPTIONS, ModalShell, relativeDuration, shortDuration, timeLeftUntil, zoneAbbr } from "@/components/ui-kit";
+import { auditToJson, downloadText, tasksToCsv } from "@/lib/export";
+import { extractActionItems } from "@/lib/actions";
+import { parseIcs } from "@/lib/ics";
+import { parseQuickTask } from "@/lib/quick-add";
 import {
   formatClock, formatDateLabel, getNextShiftDate, getShiftDateKey, getShiftDateKeyFromCivilDate,
   getShiftDateKeyFromStart, getShiftEnd, getShiftProgress, getShiftStart, getShiftState,
-  isoToIstDateTimeInput, istDateTimeInputToIso,
+  istDateTimeInputToIso, nextGapChange, setClockFormat,
 } from "@/lib/night-shift";
 import {
-  addTaskStep, createMeeting, createProject, createTask, createTemplate, ensureShift,
-  loadTrackerData, removeAttachment, removeTask, saveMeeting, saveProject, saveShift,
-  setStepComplete, taskStatusChanges, updateAttachment, updateTask, uploadEvidence,
+  addTaskStep, removeTask, createMeeting, removeMeeting, saveMeeting, createProject, createTask, ensureShift,
+  loadTrackerData, removeAttachment, saveShift,
+  setStepComplete, taskStatusChanges, updateAttachment, updateTask, uploadEvidence, uploadReport,
 } from "@/lib/tracker-store";
 import type { Attachment, Meeting, PlanBucket, Project, Shift, Task, TaskPriority, TrackerData, WorkflowTemplate } from "@/lib/tracker-types";
 
@@ -39,44 +54,12 @@ export const Route = createFileRoute("/")({
   component: NightShiftApp,
 });
 
-type Section = "shift" | "planner" | "archive";
+type Section = "shift" | "meetings" | "projects" | "planner" | "archive";
 type LoginMode = "sign-in" | "create";
 type TrackerUser = { id: string; email?: string };
 type Modal = "project" | "meeting" | "template" | "wrap" | null;
 
-const BUCKET_OPTIONS: { id: PlanBucket; label: string }[] = [
-  { id: "tonight", label: "Tonight" },
-  { id: "tomorrow", label: "Tomorrow" },
-  { id: "next_7_days", label: "Next 7 days" },
-  { id: "next_30_days", label: "Next 30 days" },
-  { id: "backlog", label: "Backlog" },
-];
-const BUCKET_COPY: Record<PlanBucket, string> = {
-  tonight: "Tonight", tomorrow: "Tomorrow", next_7_days: "Next 7 days", next_30_days: "Next 30 days", backlog: "Backlog",
-};
-const BRAND_MARKS = ["project-tone-0", "project-tone-1", "project-tone-2", "project-tone-3"];
 const EMPTY_DATA: TrackerData = { projects: [], tasks: [], meetings: [], templates: [], shifts: [], attachments: [] };
-
-function createId() {
-  return crypto.randomUUID();
-}
-
-function relativeDuration(totalSeconds: number) {
-  const seconds = Math.max(0, Math.floor(totalSeconds));
-  return `${String(Math.floor(seconds / 3600)).padStart(2, "0")}:${String(Math.floor((seconds % 3600) / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
-}
-
-function dateAtMinute(date: Date, minute: number) {
-  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
-  const fields = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  const value = `${fields["year"]}-${fields["month"]}-${fields["day"]}T${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
-  return istDateTimeInputToIso(value);
-}
-
-function timeLeftUntil(target: Date, now: Date) {
-  const seconds = Math.max(0, Math.floor((target.getTime() - now.getTime()) / 1000));
-  return `${String(Math.floor(seconds / 3600)).padStart(2, "0")}h ${String(Math.floor((seconds % 3600) / 60)).padStart(2, "0")}m`;
-}
 
 function LoginScreen() {
   const [mode, setMode] = useState<LoginMode>("sign-in");
@@ -106,8 +89,9 @@ function LoginScreen() {
   };
   return (
     <main className="auth-screen">
+      <ParticleField enabled />
       <section className="auth-story">
-        <div className="brand-row"><span className="brand-glyph"><Moon size={20} /></span><span>Nightshift</span><span className="brand-separator">/</span><span className="brand-muted">Operations desk</span></div>
+        <div className="brand-row"><Logo size={30} /><span>Nightshift</span><span className="brand-separator">/</span><span className="brand-muted">Operations desk</span></div>
         <div className="auth-copy">
           <span className="eyebrow"><span className="live-dot" /> YOUR HOURS, IN ORDER</span>
           <h1>Make the<br /><em>quiet hours</em><br />count.</h1>
@@ -146,17 +130,34 @@ function NightShiftApp() {
   const [activeSection, setActiveSection] = useState<Section>("shift");
   const [modal, setModal] = useState<Modal>(null);
   const [selectedAttachment, setSelectedAttachment] = useState<string | null>(null);
-  const [focusMode, setFocusMode] = useState(false);
   const [shift, setShift] = useState<Shift | null>(null);
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [plannerBucket, setPlannerBucket] = useState<PlanBucket>("tomorrow");
   const [archiveMonth, setArchiveMonth] = useState(() => new Date());
   const [archiveDay, setArchiveDay] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [showRollovers, setShowRollovers] = useState(false);
+  const [clientId, setClientIdState] = useState("");
+  const [meetingDetailId, setMeetingDetailId] = useState<string | null>(null);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [menu, setMenu] = useState<"bell" | "account" | null>(null);
+  const [prefsOpen, setPrefsOpen] = useState(false);
+  const [prefs, setPrefsState] = useState<Prefs>(DEFAULT_PREFS);
+  useEffect(() => { setPrefsState(loadPrefs()); }, []);
+  const setPrefs = (next: Prefs) => { setPrefsState(next); savePrefs(next); };
+  setClockFormat({ hour12: prefs.hour12, seconds: prefs.seconds });
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [readNotices, setReadNotices] = useState<Record<string, string>>({});
+  useEffect(() => { try { setReadNotices(JSON.parse(localStorage.getItem("ns-read-notices") ?? "{}") as Record<string, string>); } catch { /* ignore */ } }, []);
+  const markRead = (entries: Array<{ id: string; text: string }>) => setReadNotices((current) => { const next = { ...current }; for (const entry of entries) next[entry.id] = entry.text; try { localStorage.setItem("ns-read-notices", JSON.stringify(next)); } catch { /* ignore */ } return next; });
+  useEffect(() => {
+    if (!menu) return;
+    const close = (event: MouseEvent) => { if (!(event.target as HTMLElement).closest(".menu-wrap")) setMenu(null); };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [menu]);
+  useEffect(() => { try { setClientIdState(localStorage.getItem("ns-client") ?? ""); } catch { /* storage unavailable */ } }, []);
+  const setClientId = (id: string) => { setClientIdState(id); try { localStorage.setItem("ns-client", id); } catch { /* ignore */ } };
   const [evidenceInput, setEvidenceInput] = useState<{ file: File; taskId: string | null } | null>(null);
-  const [wrapSeconds, setWrapSeconds] = useState(60);
 
   useEffect(() => {
     let alive = true;
@@ -209,11 +210,33 @@ function NightShiftApp() {
   const progress = getShiftProgress(now);
   const tasks = data.tasks;
   const projects = data.projects.filter((project) => !project.archived_at);
-  const tonightTasks = tasks.filter((task) => task.planning_bucket === "tonight" && task.status !== "done");
-  const completedTonight = tasks.filter((task) => task.planning_bucket === "tonight" && task.status === "done").length;
+  const isThisShift = (task: Task) => task.planned_date === currentShiftKey || (task.completed_at ?? "") >= shiftStart.toISOString();
+  const tonightOpen = tasks.filter((task) => task.planning_bucket === "tonight" && task.status !== "done");
+  const tonightDone = tasks.filter((task) => task.planning_bucket === "tonight" && task.status === "done" && isThisShift(task));
+  const tonightTasks = [...tonightOpen, ...tonightDone];
+  const openTonightCount = tonightOpen.length;
+  const completedTonight = tonightDone.length;
   const upcomingMeetings = data.meetings.filter((meeting) => new Date(meeting.starts_at) >= shiftStart && new Date(meeting.starts_at) <= shiftEnd);
   const activeMeeting = upcomingMeetings.find((meeting) => new Date(meeting.starts_at).getTime() - now.getTime() <= 5 * 60_000 && new Date(meeting.starts_at) >= now);
   const nextShift = getNextShiftDate(now);
+  const clientProject = projects.find((project) => project.id === clientId && !project.archived_at);
+  const clientTz = clientProject?.timezone ?? "America/New_York";
+  const gapChange = nextGapChange(now, clientTz);
+  const minutesLeft = (shiftEnd.getTime() - now.getTime()) / 60_000;
+  const wrapDue = shiftState === "active" && minutesLeft <= prefs.wrapLeadMin;
+  const nextMeetingSoon = data.meetings.map((meeting) => ({ meeting, mins: (new Date(meeting.starts_at).getTime() - now.getTime()) / 60_000 })).filter((item) => item.mins > 0 && item.mins <= 30).sort((a, b) => a.mins - b.mins)[0];
+  const noProjectCount = tasks.filter((task) => task.status !== "done" && !task.project_id).length;
+  const blockedCount = tasks.filter((task) => task.status === "blocked").length;
+  const highOpenTonight = tonightOpen.filter((task) => task.priority === "high").length;
+  const notices: Array<{ id: string; tone: "alert" | "warn" | "info"; text: string; go?: () => void }> = [];
+  if (wrapDue) notices.push({ id: "wrap", tone: "alert", text: `Shift ends in ${Math.max(1, Math.round(minutesLeft))} min — wrap up`, go: () => setModal("wrap") });
+  if (nextMeetingSoon) notices.push({ id: "meeting", tone: "info", text: `${nextMeetingSoon.meeting.title} starts in ${Math.max(1, Math.round(nextMeetingSoon.mins))} min`, go: () => setMeetingDetailId(nextMeetingSoon.meeting.id) });
+  if (blockedCount) notices.push({ id: "blocked", tone: "warn", text: `${blockedCount} blocked task${blockedCount === 1 ? "" : "s"} need attention`, go: () => setActiveSection("shift") });
+  if (highOpenTonight) notices.push({ id: "high", tone: "warn", text: `${highOpenTonight} high-priority task${highOpenTonight === 1 ? "" : "s"} still open tonight`, go: () => setActiveSection("shift") });
+  if (noProjectCount) notices.push({ id: "noproject", tone: "warn", text: `${noProjectCount} open task${noProjectCount === 1 ? "" : "s"} have no project`, go: () => setActiveSection("planner") });
+  if (gapChange) notices.push({ id: "dst", tone: "info", text: `US time change in ${gapChange.inDays} days: gap ${gapChange.from}→${gapChange.to}h` });
+  if (!projects.some((project) => !project.archived_at)) notices.push({ id: "firstproject", tone: "info", text: "Create your first client project", go: () => setActiveSection("projects") });
+  const unreadNotices = notices.filter((notice) => readNotices[notice.id] !== notice.text);
   const selectedAttachmentValue = data.attachments.find((attachment) => attachment.id === selectedAttachment) ?? null;
 
   async function refresh() {
@@ -245,11 +268,8 @@ function NightShiftApp() {
 
   async function toggleTaskTimer(task: Task) {
     if (!user || !shift) return;
-    if (task.status === "in_progress" && task.started_at) {
-      const start = new Date(task.started_at);
-      const cappedNow = new Date(Math.min(now.getTime(), shiftEnd.getTime()));
-      const earned = Math.max(0, Math.floor((cappedNow.getTime() - start.getTime()) / 1000));
-      await runAction(() => updateTask(user.id, task.id, { status: "queued", started_at: null, elapsed_seconds: task.elapsed_seconds + earned }), "Timer paused");
+    if (task.status === "in_progress") {
+      await runAction(() => updateTask(user.id, task.id, { status: "queued", started_at: null, elapsed_seconds: task.elapsed_seconds + runningSeconds(task, now) }), "Timer paused");
       return;
     }
     if (shiftState !== "active") {
@@ -257,6 +277,11 @@ function NightShiftApp() {
       return;
     }
     await runAction(async () => {
+      if (prefs.singleTimer) {
+        for (const other of tasks.filter((item) => item.status === "in_progress" && item.id !== task.id)) {
+          await updateTask(user.id, other.id, { status: "queued", started_at: null, elapsed_seconds: other.elapsed_seconds + runningSeconds(other, now) });
+        }
+      }
       if (!shift.started_at) await saveShift(user.id, shift.id, { started_at: shiftStart.toISOString() });
       await updateTask(user.id, task.id, { status: "in_progress", started_at: now.toISOString(), shift_id: shift.id, planning_bucket: "tonight" });
     }, "Timer started");
@@ -264,12 +289,29 @@ function NightShiftApp() {
 
   async function handleTaskComplete(task: Task, checked: boolean) {
     if (!user) return;
-    const earned = task.status === "in_progress" && task.started_at
-      ? Math.max(0, Math.floor((Math.min(now.getTime(), shiftEnd.getTime()) - new Date(task.started_at).getTime()) / 1000))
-      : 0;
     await runAction(() => updateTask(user.id, task.id, checked
-      ? { ...taskStatusChanges("done"), started_at: null, elapsed_seconds: task.elapsed_seconds + earned }
+      ? { ...taskStatusChanges("done"), started_at: null, elapsed_seconds: task.elapsed_seconds + runningSeconds(task, now) }
       : { status: "queued", completed_at: null }), checked ? "Task completed" : "Task reopened");
+  }
+
+  async function editTask(task: Task, changes: TaskEdit) {
+    if (!user) return;
+    const earned = runningSeconds(task, now);
+    const bucketChanged = changes.planning_bucket !== task.planning_bucket;
+    const statusPart = changes.status === "done"
+      ? { ...taskStatusChanges("done"), started_at: null, elapsed_seconds: task.elapsed_seconds + earned }
+      : changes.status === "blocked"
+        ? { status: "blocked" as const, started_at: null, completed_at: null, elapsed_seconds: task.elapsed_seconds + earned }
+        : task.status === "in_progress" ? {} : { status: "queued" as const, completed_at: null };
+    await runAction(() => updateTask(user.id, task.id, {
+      title: changes.title, description: changes.description, project_id: changes.project_id, priority: changes.priority, planning_bucket: changes.planning_bucket,
+      ...(bucketChanged ? { planned_date: plannedDateFor(changes.planning_bucket, now) } : {}), ...statusPart,
+    }), "Task updated");
+  }
+
+  async function deleteTask(task: Task) {
+    if (!user) return;
+    await runAction(() => removeTask(user.id, task.id), "Task deleted");
   }
 
   async function handleStepChange(stepId: string, checked: boolean) {
@@ -289,6 +331,14 @@ function NightShiftApp() {
     setEvidenceInput({ file: imageFile, taskId });
   }
 
+  async function saveMeetingFile(meeting: Meeting, file: File) {
+    if (!user) return;
+    await runAction(async () => {
+      const added = await uploadEvidence(user.id, shift?.id ?? null, null, file, { bucket: "meeting-assets", meetingId: meeting.id });
+      setData((current) => ({ ...current, attachments: [added, ...current.attachments] }));
+    }, "Meeting file saved privately");
+  }
+
   async function saveEvidence(file: File, taskId: string | null) {
     if (!user) return;
     await runAction(async () => {
@@ -303,16 +353,77 @@ function NightShiftApp() {
     if (!user || !shift) return;
     await runAction(async () => {
       await saveShift(user.id, shift.id, { ended_at: now.toISOString(), wrap_up: text });
+      await uploadReport(user.id, shift.id, `handover-${shift.shift_date}.md`, handoverText("Slack", text)).catch(() => toast.warning("Saved, but the report file could not be stored"));
       setModal(null);
     }, "Shift wrapped up");
   }
 
-  function copyShiftMessage(target: "Slack" | "Teams") {
-    const done = tasks.filter((task) => task.planning_bucket === "tonight" && task.status === "done");
-    const next = tasks.filter((task) => task.planning_bucket === "tonight" && task.status !== "done");
-    const lines = [`Night shift handoff · ${shift?.shift_date ?? currentShiftKey}`, "", "Completed:", ...done.map((task) => `• ${task.title}`), "", "Rolling over:", ...next.map((task) => `• ${task.title}`)];
-    if (shift?.wrap_up) lines.push("", "Notes:", shift.wrap_up);
-    void navigator.clipboard.writeText(lines.join("\n")).then(() => toast.success(`${target} handoff copied`));
+  async function pullTask(task: Task) {
+    if (!user) return;
+    await runAction(() => updateTask(user.id, task.id, { planning_bucket: "tonight", planned_date: getShiftDateKey(now) }), "Moved to tonight");
+  }
+
+  async function quickAddTask(text: string, projectId: string, priority: TaskPriority) {
+    if (!user) return;
+    const parsed = parseQuickTask(text, projects, "tonight");
+    if (!parsed.title) { toast.error("Add a task title first."); return; }
+    const chosenProject = parsed.projectId ?? (projectId || null);
+    if (!chosenProject) { toast.error("Choose a project for this task."); return; }
+    const plannedDate = parsed.bucket === "tonight" ? getShiftDateKey(now) : parsed.bucket === "tomorrow" ? getShiftDateKeyFromStart(getNextShiftDate(now)) : null;
+    await runAction(() => createTask(user.id, { title: parsed.title, description: "", project_id: chosenProject, planning_bucket: parsed.bucket, planned_date: plannedDate, priority: parsed.priority !== "normal" ? parsed.priority : priority, steps: parsed.steps, shift_id: null }), `Added to ${BUCKET_COPY[parsed.bucket].toLowerCase()}`);
+  }
+
+  async function tasksFromItems(items: string[], projectId: string | null) {
+    if (!user || !items.length) return;
+    const chosenProject = projectId ?? clientProject?.id ?? null;
+    if (!chosenProject) { toast.error("Choose an active client (top bar) so these tasks have a project."); return; }
+    await runAction(async () => {
+      for (const title of items) {
+        await createTask(user.id, { title, description: "", project_id: chosenProject, planning_bucket: "tonight", planned_date: getShiftDateKey(now), priority: "normal", steps: [], shift_id: null });
+      }
+    }, `${items.length} task${items.length === 1 ? "" : "s"} added to tonight`);
+  }
+
+  async function importIcs(file: File) {
+    if (!user) return;
+    const events = parseIcs(await file.text());
+    if (!events.length) { toast.error("No events found in that .ics file."); return; }
+    const known = new Set(data.meetings.map((meeting) => `${meeting.title}|${new Date(meeting.starts_at).toISOString()}`));
+    const fresh = events.filter((event) => !known.has(`${event.title}|${event.startsAt}`));
+    await runAction(async () => {
+      for (const event of fresh) {
+        await createMeeting(user.id, { shift_id: shift?.id ?? null, project_id: clientProject?.id ?? null, title: event.title, client_name: clientProject?.client_name ?? "", starts_at: event.startsAt, ends_at: event.endsAt, agenda: "", dossier: event.description, notes: "", action_items: [] });
+      }
+    }, fresh.length ? `${fresh.length} meeting${fresh.length === 1 ? "" : "s"} imported` : "Everything in that file is already imported");
+  }
+
+  async function saveMeetingDetail(meetingId: string, changes: Partial<Meeting>) {
+    if (!user) return;
+    await runAction(() => saveMeeting(user.id, meetingId, changes), "Meeting saved");
+  }
+
+  async function deleteMeeting(meeting: Meeting) {
+    if (!user) return;
+    await runAction(() => removeMeeting(user.id, meeting.id), "Meeting deleted");
+  }
+
+  function handoverText(target: "Slack" | "Teams" | "Email" | "Client", wrapNote = shift?.wrap_up ?? "") {
+    const tonight = tonightTasks;
+    const done = tonight.filter((task) => task.status === "done");
+    const blocked = tonight.filter((task) => task.status === "blocked");
+    const next = tonight.filter((task) => task.status !== "done" && task.status !== "blocked");
+    const hours = (tonight.reduce((sum, task) => sum + totalSeconds(task, now), 0) / 3600).toFixed(1);
+    const bullet = (task: Task) => target === "Client" ? `• ${task.title}${projects.find((project) => project.id === task.project_id) ? ` (${projects.find((project) => project.id === task.project_id)?.name})` : ""}` : `• ${task.title}`;
+    const date = shift?.shift_date ?? currentShiftKey;
+    const lines = [target === "Email" ? `Subject: Night shift handover · ${date}\n\nHi team,\n` : target === "Client" ? `Subject: Overnight update · ${date}\n\nHi,\n\nHere is where things stand after tonight's shift.\n` : `Night shift handoff · ${date}`, "", `Logged: ${hours}h`, "", "Completed:", ...done.map(bullet), "", "In flight / rolling over:", ...next.map(bullet)];
+    if (blocked.length) lines.push("", "Blocked:", ...blocked.map(bullet));
+    if (wrapNote) lines.push("", "Notes:", wrapNote);
+    if (target === "Email" || target === "Client") lines.push("", target === "Client" ? "Regards," : "Thanks,");
+    return lines.join("\n");
+  }
+
+  function copyShiftMessage(target: "Slack" | "Teams" | "Email" | "Client") {
+    void navigator.clipboard.writeText(handoverText(target)).then(() => toast.success(`${target} handoff copied`));
   }
 
   function handleClipboard(event: ClipboardEvent) {
@@ -325,242 +436,306 @@ function NightShiftApp() {
   }
 
   useEffect(() => {
+    const onSearchKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setActiveSection("archive");
+        window.setTimeout(() => document.querySelector<HTMLInputElement>('[aria-label="Search tasks, meeting notes, and evidence"]')?.focus(), 60);
+      }
+    };
+    window.addEventListener("keydown", onSearchKey);
+    return () => window.removeEventListener("keydown", onSearchKey);
+  }, []);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (event.metaKey || event.ctrlKey || event.altKey || modal || target?.closest("input, textarea, select, [contenteditable]")) return;
+      if (/^[1-9]$/.test(event.key)) {
+        const step = tasks.find((task) => task.status === "in_progress")?.steps[Number(event.key) - 1];
+        if (step) void handleStepChange(step.id, !step.completed);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  const autoPausing = useRef(false);
+  useEffect(() => {
+    if (!user || shiftState === "active" || autoPausing.current) return;
+    const stale = tasks.filter((task) => task.status === "in_progress");
+    if (!stale.length) return;
+    autoPausing.current = true;
+    void (async () => {
+      try {
+        for (const task of stale) await updateTask(user.id, task.id, { status: "queued", started_at: null, elapsed_seconds: task.elapsed_seconds + runningSeconds(task, new Date()) });
+        await refresh();
+        toast.message("Timer stopped at the end of the shift");
+      } catch { /* retried on next change */ } finally { autoPausing.current = false; }
+    })();
+  }, [shiftState, tasks]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const reminded = useRef(new Map<string, number>());
+  useEffect(() => {
+    if (!prefs.timerReminderMin) return;
+    for (const task of tasks.filter((item) => item.status === "in_progress" && item.started_at)) {
+      const mins = runningSeconds(task, now) / 60;
+      const steps = Math.floor(mins / prefs.timerReminderMin);
+      if (steps >= 1 && (reminded.current.get(task.id) ?? 0) < steps) {
+        reminded.current.set(task.id, steps);
+        toast.info(`Still on “${task.title}”? Timer is at ${shortDuration(runningSeconds(task, now))}.`);
+      }
+    }
+  }, [Math.floor(now.getTime() / 60_000), prefs.timerReminderMin]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
     window.addEventListener("paste", handleClipboard);
     return () => window.removeEventListener("paste", handleClipboard);
   }, [user]);
 
-  useEffect(() => {
-    if (modal !== "wrap") return;
-    setWrapSeconds(60);
-    const timer = window.setInterval(() => setWrapSeconds((value) => Math.max(0, value - 1)), 1000);
-    const close = window.setTimeout(() => setModal(null), 60_000);
-    return () => { window.clearInterval(timer); window.clearTimeout(close); };
-  }, [modal]);
+  if (!authReady) return <main className="boot-screen"><Logo size={30} /><LoaderCircle size={18} className="spin" /><span>Opening your shift desk</span></main>;
+  if (!user) return <><Toaster theme="dark" /><LoginScreen />{loadError ? <div className="auth-runtime-error" role="alert">{loadError}</div> : null}</>;
 
-  if (!authReady) return <main className="boot-screen"><span className="brand-glyph"><Moon size={20} /></span><LoaderCircle size={18} className="spin" /><span>Opening your shift desk</span></main>;
-  if (!user) return <><LoginScreen />{loadError ? <div className="auth-runtime-error" role="alert">{loadError}</div> : null}</>;
+  const editingTask = tasks.find((task) => task.id === editingTaskId) ?? null;
+  const meetingForDialog = data.meetings.find((item) => item.id === meetingDetailId) ?? null;
+  const upcomingCount = data.meetings.filter((meeting) => new Date(meeting.ends_at ?? meeting.starts_at) >= now).length;
+  const activeProjects = data.projects.filter((project) => !project.archived_at);
+  const headActions = <>
+    <button className="client-chip" title="Active client — change it from the clock menu" onClick={() => setActiveSection("projects")}><Users size={13} />{clientProject ? (clientProject.client_name || clientProject.name) : "Default client"} · {zoneAbbr(now, clientTz)}</button>
+    {wrapDue ? <Button className="primary-action wrap-due" size="sm" onClick={() => setModal("wrap")}><Clipboard size={13} /> Wrap up now</Button> : null}
+    {shiftState === "active" ? <Button className="primary-action" size="sm" onClick={() => void beginShift()} disabled={busy || !!shift?.started_at}><span className="button-signal" />{shift?.started_at ? "Shift running" : "Start shift"}</Button> : null}
+  </>;
 
   return (
-    <main className={`app-frame${focusMode ? " focus-on" : ""}`}>
-      <aside className="sidebar">
-        <div className="side-brand"><span className="brand-glyph"><Moon size={18} /></span><span className="side-wordmark">Nightshift<span>OPS</span></span></div>
-        <div className="side-workspace"><span className="workspace-initial">{(user.email?.[0] ?? "W").toUpperCase()}</span><span className="workspace-copy"><strong>My workspace</strong><small>Private desk</small></span><ChevronDown size={15} /></div>
-        <div className="side-label">WORKSPACE</div>
-        <nav className="side-nav" aria-label="Main navigation">
-          <NavButton section="shift" active={activeSection} setActive={setActiveSection} icon={<Moon size={17} />} label="My shift" {...(tonightTasks.length > 0 ? { badge: String(tonightTasks.length) } : {})} />
-          <NavButton section="planner" active={activeSection} setActive={setActiveSection} icon={<FolderKanban size={17} />} label="Projects & planning" />
-          <NavButton section="archive" active={activeSection} setActive={setActiveSection} icon={<Archive size={17} />} label="Archive & audit" />
+    <><ParticleField enabled /><Toaster theme="dark" position="bottom-right" />
+    <main className="app-frame">
+      <header className="topnav">
+        <button className="nav-brand" aria-label="Go to dashboard" title="Dashboard" onClick={() => { setActiveSection("shift"); setMenu(null); }}><Logo size={26} /><span className="nav-wordmark">Nightshift</span></button>
+        <nav className="nav-tabs" aria-label="Main navigation">
+          <NavButton section="shift" active={activeSection} setActive={setActiveSection} icon={<Activity size={15} />} label="Dashboard" {...(openTonightCount > 0 ? { badge: String(openTonightCount) } : {})} />
+          <NavButton section="meetings" active={activeSection} setActive={setActiveSection} icon={<CalendarDays size={15} />} label="Meetings" {...(upcomingCount > 0 ? { badge: String(upcomingCount) } : {})} />
+          <NavButton section="projects" active={activeSection} setActive={setActiveSection} icon={<Users size={15} />} label="Projects" {...(activeProjects.length > 0 ? { badge: String(activeProjects.length) } : {})} />
+          <NavButton section="planner" active={activeSection} setActive={setActiveSection} icon={<FolderKanban size={15} />} label="Plan" {...(tasks.filter((task) => task.status !== "done" && task.planning_bucket !== "tonight").length > 0 ? { badge: String(tasks.filter((task) => task.status !== "done" && task.planning_bucket !== "tonight").length) } : {})} />
+          <NavButton section="archive" active={activeSection} setActive={setActiveSection} icon={<Archive size={15} />} label="Archive" />
         </nav>
-        <div className="side-project-heading"><span className="side-label">CLIENT PROJECTS</span><Button variant="ghost" size="icon" aria-label="Add project" title="Add project" onClick={() => setModal("project")}><Plus size={15} /></Button></div>
-        <div className="side-projects">{projects.length ? projects.slice(0, 5).map((project, index) => <button key={project.id} className="side-project" onClick={() => { setActiveSection("planner"); setPlannerBucket("tonight"); }}><span className={`project-pin ${BRAND_MARKS[index % BRAND_MARKS.length]}`} />{project.name}</button>) : <p className="side-empty">Your client list is ready for a first project.</p>}</div>
-        <div className="side-bottom">
-          <div className="side-shift-status"><span className={`status-dot${shiftState === "active" ? " is-live" : ""}`} /><span><strong>{shiftState === "active" ? "Shift window open" : "Next shift"}</strong><small>17:30 – 03:30 IST</small></span><ArrowRight size={14} /></div>
-          <button className="side-account" onClick={() => void supabase.auth.signOut()}><span className="account-avatar">{(user.email?.[0] ?? "U").toUpperCase()}</span><span className="account-copy"><strong>{user.email ?? "Signed in"}</strong><small>Sign out</small></span><LogOut size={15} /></button>
+        <div className="nav-right">
+          <ClockMenu now={now} clientTz={clientTz} clientId={clientProject?.id ?? ""} projects={projects} onClient={setClientId} shiftState={shiftState} shiftStart={shiftStart} shiftEnd={shiftEnd} nextShift={nextShift} gapChange={gapChange} />
+          <div className="menu-wrap">
+            <button className={`icon-nav${unreadNotices.some((notice) => notice.tone !== "info") ? " has-alert" : ""}`} aria-label={`Notifications (${unreadNotices.length} unread)`} aria-expanded={menu === "bell"} onClick={() => setMenu(menu === "bell" ? null : "bell")}><Bell size={16} />{unreadNotices.length ? <span className="bell-badge">{unreadNotices.length}</span> : null}</button>
+            {menu === "bell" ? <div className="popover" role="menu"><div className="popover-title"><span>Notifications</span><button className="link-btn" disabled={!unreadNotices.length} onClick={() => markRead(notices)}>Mark all read</button></div>{notices.length ? notices.map((notice) => { const unread = readNotices[notice.id] !== notice.text; return <button key={notice.id} role="menuitem" className={`notice ${notice.tone}${unread ? "" : " read"}`} onClick={() => { markRead([notice]); setMenu(null); notice.go?.(); }}><span className="notice-dot" />{notice.text}</button>; }) : <p className="popover-empty">All clear</p>}</div> : null}
+          </div>
+          <div className="menu-wrap">
+            <button className="nav-account" aria-label="Account menu" aria-expanded={menu === "account"} onClick={() => setMenu(menu === "account" ? null : "account")}><span className="account-avatar">{(user.email?.[0] ?? "U").toUpperCase()}</span><span className="account-label">Account</span><ChevronDown size={13} /></button>
+            {menu === "account" ? <div className="popover small" role="menu"><div className="popover-title">{user.email ?? "Signed in"}</div><button role="menuitem" className="menu-item" onClick={() => { setMenu(null); setPrefsOpen(true); }}><SlidersHorizontal size={14} /> Preferences</button><button role="menuitem" className="menu-item" onClick={() => void supabase.auth.signOut()}><LogOut size={14} /> Sign out</button></div> : null}
+          </div>
         </div>
-      </aside>
-
+      </header>
       <section className="app-content">
-        <header className="topbar"><div className="breadcrumbs"><span>WORKSPACE</span><ChevronRight size={13} /><strong>{activeSection === "shift" ? "MY SHIFT" : activeSection === "planner" ? "PROJECTS & PLANNING" : "ARCHIVE & AUDIT"}</strong></div><div className="topbar-actions"><div className="quiet-pill"><span className="status-dot is-live" /> YOUR TIME IS YOURS</div><Button variant={focusMode ? "secondary" : "ghost"} size="sm" className="focus-button" onClick={() => setFocusMode(!focusMode)}><Focus size={15} />{focusMode ? "Exit focus" : "Focus mode"}</Button><span className="topbar-date">{formatDateLabel(now, "Asia/Kolkata")}</span></div></header>
         {loadError ? <div className="error-banner" role="alert"><span>{loadError}</span><Button variant="outline" size="sm" onClick={() => { setLoadError(""); void refresh(); }}>Retry</Button></div> : null}
-        {focusMode ? <div className="focus-strip"><Focus size={15} /> FOCUS MODE <span>·</span> {formatClock(now, "Asia/Kolkata")} IST <Button size="icon" variant="ghost" aria-label="Exit focus mode" onClick={() => setFocusMode(false)}><X size={15} /></Button></div> : null}
-        <div className="mobile-section-tabs" role="tablist" aria-label="Tracker sections">
-          <button role="tab" aria-selected={activeSection === "shift"} onClick={() => setActiveSection("shift")}><Moon size={15} /> Shift</button>
-          <button role="tab" aria-selected={activeSection === "planner"} onClick={() => setActiveSection("planner")}><FolderKanban size={15} /> Plan</button>
-          <button role="tab" aria-selected={activeSection === "archive"} onClick={() => setActiveSection("archive")}><Archive size={15} /> Archive</button>
-        </div>
-        {activeSection === "shift" ? <ShiftSection {...{ now, shift, shiftState, shiftStart, shiftEnd, progress, nextShift, projects, tasks, tonightTasks, completedTonight, upcomingMeetings, activeMeeting, attachments: data.attachments, onBegin: beginShift, onTaskTimer: toggleTaskTimer, onTaskComplete: handleTaskComplete, onStepChange: handleStepChange, onAddStep: handleAddStep, onAddTask: () => setModal("template"), onAddMeeting: () => setModal("meeting"), onWrap: () => setModal("wrap"), onPaste: (file, taskId) => void onEvidence(file, taskId), onAttachment: setSelectedAttachment, onRollover: () => setShowRollovers(!showRollovers), showRollovers, busy }} /> : null}
-        {activeSection === "planner" ? <PlannerSection {...{ userId: user.id, now, projects, tasks, meetings: data.meetings, templates: data.templates, bucket: plannerBucket, setBucket: setPlannerBucket, busy, onRun: runAction, onModal: setModal, onDataChange: refresh, onTaskTimer: toggleTaskTimer, shiftState }} /> : null}
-        {activeSection === "archive" ? <ArchiveSection {...{ data, now, month: archiveMonth, setMonth: setArchiveMonth, day: archiveDay, setDay: setArchiveDay, search, setSearch, onAttachment: setSelectedAttachment }} /> : null}
-        <footer className="page-footer"><span><ShieldCheck size={14} /> PRIVATE TO YOUR ACCOUNT</span><span>Asia / Kolkata <span className="footer-dot">·</span> America / New York</span></footer>
+        {activeSection === "shift" ? <ShiftSection {...{ onEditTask: (task: Task) => setEditingTaskId(task.id), headActions, onTile: (kind: "projects" | "archive" | "meeting") => { if (kind === "meeting") { const next = upcomingMeetings.filter((meeting) => new Date(meeting.starts_at) > now).sort((a, b) => a.starts_at.localeCompare(b.starts_at))[0]; if (next) setMeetingDetailId(next.id); else setActiveSection("meetings"); } else setActiveSection(kind); }, now, shift, shiftState, shiftStart, shiftEnd, progress, nextShift, projects, tasks, tonightTasks, completedTonight, upcomingMeetings, activeMeeting, attachments: data.attachments, clientTz, onQuickAdd: (text: string, projectId: string, priority: TaskPriority) => void quickAddTask(text, projectId, priority), activeClientId: clientProject?.id ?? "", onPull: (task: Task) => void pullTask(task), onOpenMeeting: (meeting: Meeting) => setMeetingDetailId(meeting.id), onImportIcs: (file: File) => void importIcs(file), onPasteNotes: () => setPasteOpen(true), onTaskTimer: toggleTaskTimer, onTaskComplete: handleTaskComplete, onStepChange: handleStepChange, onAddStep: handleAddStep, onAddTask: () => setModal("template"), onAddMeeting: () => setModal("meeting"), onWrap: () => setModal("wrap"), onPaste: (file, taskId) => void onEvidence(file, taskId), onAttachment: setSelectedAttachment, busy, onMeetingFile: saveMeetingFile, onNotes: (text: string) => { if (user && shift) void saveShift(user.id, shift.id, { focus_notes: text }).catch(() => toast.error("Scratchpad could not be saved")); } }} /> : null}
+        {activeSection === "meetings" ? <MeetingsSection meetings={data.meetings} projects={projects} now={now} tz={clientTz} onOpen={(meeting) => setMeetingDetailId(meeting.id)} onAdd={() => setModal("meeting")} onImport={(file) => void importIcs(file)} onTasks={(meeting) => void tasksFromItems(meeting.action_items, meeting.project_id)} /> : null}
+        {activeSection === "projects" ? <ProjectsSection userId={user.id} projects={data.projects} tasks={tasks} meetings={data.meetings} templates={data.templates} now={now} activeClientId={clientProject?.id ?? ""} busy={busy} onUseClient={(id) => { setClientId(id); toast.success("Active client updated"); }} onRun={runAction} onNewProject={() => setModal("project")} onEditTask={(task) => setEditingTaskId(task.id)} onOpenMeeting={(meeting) => setMeetingDetailId(meeting.id)} /> : null}
+        {activeSection === "planner" ? <PlanBoard userId={user.id} projects={projects} tasks={tasks} templates={data.templates} now={now} activeClientId={clientProject?.id ?? ""} busy={busy} onRun={runAction} onEditTask={(task) => setEditingTaskId(task.id)} /> : null}
+        {activeSection === "archive" ? <ArchiveSection {...{ clientTz, data, now, month: archiveMonth, setMonth: setArchiveMonth, day: archiveDay, setDay: setArchiveDay, search, setSearch, onAttachment: setSelectedAttachment }} /> : null}
       </section>
 
       {modal === "project" ? <ProjectModal userId={user.id} onClose={() => setModal(null)} onSave={async (project) => { await runAction(async () => { await createProject(user.id, project); }, "Project created"); setModal(null); }} /> : null}
       {modal === "meeting" ? <MeetingModal userId={user.id} shiftId={shift?.id ?? null} projects={projects} onClose={() => setModal(null)} onSave={async (meeting) => { await runAction(async () => { await createMeeting(user.id, meeting); }, "Meeting added"); setModal(null); }} /> : null}
-      {modal === "template" ? <TaskModal userId={user.id} shiftId={shift?.id ?? null} projects={projects} templates={data.templates} defaultBucket="tonight" onClose={() => setModal(null)} onSave={async (task) => { await runAction(async () => { await createTask(user.id, task); }, "Task added to tonight"); setModal(null); }} /> : null}
-      {modal === "wrap" ? <WrapModal shift={shift} tasks={tasks} seconds={wrapSeconds} onClose={() => setModal(null)} onSave={updateWrapUp} onCopy={copyShiftMessage} busy={busy} /> : null}
+      {modal === "template" ? <TaskModal defaultProjectId={clientProject?.id ?? ""} userId={user.id} shiftId={shift?.id ?? null} projects={projects} templates={data.templates} defaultBucket="tonight" onClose={() => setModal(null)} onSave={async (task) => { await runAction(async () => { await createTask(user.id, task); }, "Task added to tonight"); setModal(null); }} /> : null}
+      {modal === "wrap" ? <WrapModal shift={shift} tasks={tasks} onClose={() => setModal(null)} onSave={updateWrapUp} onCopy={copyShiftMessage} busy={busy} /> : null}
+      {meetingForDialog ? <MeetingDialog key={meetingForDialog.id} meeting={meetingForDialog} projects={projects} tz={clientTz} onClose={() => setMeetingDetailId(null)} onSave={(changes) => saveMeetingDetail(meetingForDialog.id, changes)} onDelete={() => deleteMeeting(meetingForDialog)} onCreateTasks={(items, projectId) => tasksFromItems(items, projectId)} /> : null}
+      {editingTask ? <TaskEditDialog key={editingTask.id} task={editingTask} projects={projects} onClose={() => setEditingTaskId(null)} onSave={(changes) => editTask(editingTask, changes)} onDelete={() => deleteTask(editingTask)} /> : null}
+      {prefsOpen ? <PreferencesDialog prefs={prefs} onChange={setPrefs} projects={projects} clientId={clientProject?.id ?? ""} onClient={setClientId} onClose={() => setPrefsOpen(false)} /> : null}
+      {pasteOpen ? <PasteNotesDialog onClose={() => setPasteOpen(false)} onCreate={(items) => tasksFromItems(items, clientProject?.id ?? null)} /> : null}
       {evidenceInput ? <EvidenceDialog file={evidenceInput.file} busy={busy} onClose={() => setEvidenceInput(null)} onSave={(file) => void saveEvidence(file, evidenceInput.taskId)} /> : null}
       {selectedAttachmentValue ? <AttachmentDialog attachment={selectedAttachmentValue} busy={busy} onClose={() => setSelectedAttachment(null)} onSaveNote={(note) => { if (!user) return; void runAction(() => updateAttachment(user.id, selectedAttachmentValue.id, { note }), "Evidence note saved"); }} onDelete={() => { if (!user) return; void runAction(() => removeAttachment(user.id, selectedAttachmentValue), "Evidence removed"); setSelectedAttachment(null); }} /> : null}
       {busy ? <div className="save-indicator" role="status"><LoaderCircle size={14} className="spin" /> Saving</div> : null}
-    </main>
+    </main></>
   );
+}
+
+function ParticleField({ enabled }: { enabled: boolean }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas || !enabled || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    let w = 0; let h = 0; let raf = 0;
+    const resize = () => { w = window.innerWidth; h = window.innerHeight; canvas.width = w * dpr; canvas.height = h * dpr; canvas.style.width = `${w}px`; canvas.style.height = `${h}px`; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); };
+    resize();
+    window.addEventListener("resize", resize);
+    const count = Math.round(Math.min(120, (w * h) / 13000));
+    const dots = Array.from({ length: count }, () => ({ x: Math.random() * w, y: Math.random() * h, vx: (Math.random() - 0.5) * 0.28, vy: (Math.random() - 0.5) * 0.28, r: Math.random() * 1.5 + 0.6, a: Math.random() * 0.5 + 0.25, t: Math.random() * Math.PI * 2 }));
+    const tick = () => {
+      ctx.clearRect(0, 0, w, h);
+      for (const d of dots) {
+        d.x += d.vx; d.y += d.vy; d.t += 0.02;
+        if (d.x < -5) d.x = w + 5; if (d.x > w + 5) d.x = -5; if (d.y < -5) d.y = h + 5; if (d.y > h + 5) d.y = -5;
+        ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(140, 228, 255, ${Math.min(1, d.a * 1.3 * (0.65 + 0.35 * Math.sin(d.t)))})`; ctx.fill();
+      }
+      for (let i = 0; i < dots.length; i += 1) for (let j = i + 1; j < dots.length; j += 1) {
+        const a = dots[i]!; const b = dots[j]!; const dx = a.x - b.x; const dy = a.y - b.y; const dist = Math.hypot(dx, dy);
+        if (dist < 120) { ctx.strokeStyle = `rgba(90, 200, 240, ${0.13 * (1 - dist / 120)})`; ctx.lineWidth = 0.6; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    tick();
+    return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", resize); };
+  }, [enabled]);
+  return <canvas ref={ref} className="particles" aria-hidden="true" />;
+}
+
+function Logo({ size = 28 }: { size?: number }) {
+  return <svg className="logo-mark" width={size} height={size} viewBox="0 0 32 32" fill="none" aria-label="Nightshift" role="img">
+    <defs><linearGradient id="ns-logo" x1="4" y1="3" x2="28" y2="29" gradientUnits="userSpaceOnUse"><stop stopColor="#22f0e6" /><stop offset="1" stopColor="#4cff9b" /></linearGradient></defs>
+    <path d="M16 2.5 28 7v8.5c0 7.2-4.9 12.4-12 14C8.9 27.9 4 22.7 4 15.5V7L16 2.5Z" stroke="url(#ns-logo)" strokeWidth="1.8" strokeLinejoin="round" />
+    <path d="M21.2 19.4A7 7 0 1 1 13.6 9.6a5.5 5.5 0 0 0 7.6 9.8Z" fill="url(#ns-logo)" />
+    <circle cx="21.6" cy="11.2" r="1.3" fill="#4cff9b" />
+  </svg>;
 }
 
 function NavButton({ section, active, setActive, icon, label, badge }: { section: Section; active: Section; setActive: (section: Section) => void; icon: ReactNode; label: string; badge?: string }) {
   return <button className={`nav-item${active === section ? " nav-active" : ""}`} onClick={() => setActive(section)}>{icon}<span>{label}</span>{badge ? <small>{badge}</small> : null}</button>;
 }
 
-function SectionHeading({ eyebrow, title, description, action }: { eyebrow: string; title: string; description: string; action?: React.ReactNode }) {
-  return <div className="section-heading"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1><p>{description}</p></div>{action ? <div className="heading-action">{action}</div> : null}</div>;
-}
-
 function ShiftSection(props: {
   now: Date; shift: Shift | null; shiftState: ReturnType<typeof getShiftState>; shiftStart: Date; shiftEnd: Date; progress: number;
   nextShift: Date; projects: Project[]; tasks: Task[]; tonightTasks: Task[]; completedTonight: number; upcomingMeetings: Meeting[];
-  activeMeeting: Meeting | undefined; attachments: Attachment[]; onBegin: () => void; onTaskTimer: (task: Task) => void;
+  activeMeeting: Meeting | undefined; attachments: Attachment[]; clientTz: string; onTaskTimer: (task: Task) => void;
   onTaskComplete: (task: Task, checked: boolean) => void; onStepChange: (stepId: string, checked: boolean) => void;
   onAddStep: (task: Task, title: string) => void; onAddTask: () => void; onAddMeeting: () => void; onWrap: () => void;
-  onPaste: (file: File, taskId: string | null) => void; onAttachment: (id: string) => void; onRollover: () => void; showRollovers: boolean; busy: boolean;
+  onPaste: (file: File, taskId: string | null) => void; onAttachment: (id: string) => void; busy: boolean; onNotes: (text: string) => void;
+  onMeetingFile: (meeting: Meeting, file: File) => void; activeClientId: string; onQuickAdd: (text: string, projectId: string, priority: TaskPriority) => void; onPull: (task: Task) => void;
+  onOpenMeeting: (meeting: Meeting) => void; onImportIcs: (file: File) => void; onPasteNotes: () => void;
+  onEditTask: (task: Task) => void; headActions: React.ReactNode; onTile: (kind: "projects" | "archive" | "meeting") => void;
 }) {
-  const { now, shift, shiftState, shiftStart, shiftEnd, progress, nextShift, projects, tasks, tonightTasks, completedTonight, upcomingMeetings, activeMeeting, attachments, onBegin, onTaskTimer, onTaskComplete, onStepChange, onAddStep, onAddTask, onAddMeeting, onWrap, onPaste, onAttachment, onRollover, showRollovers, busy } = props;
-  const shiftProjectCounts = new Set(tonightTasks.map((task) => task.project_id).filter(Boolean)).size;
-  const rolloverTasks = tasks.filter((task) => task.rollover && task.status !== "done");
+  const { now, shift, shiftState, shiftEnd, progress, nextShift, projects, tasks, tonightTasks, completedTonight, upcomingMeetings, activeMeeting, attachments, clientTz, activeClientId, onTaskTimer, onTaskComplete, onStepChange, onAddStep, onAddTask, onAddMeeting, onWrap, onPaste, onAttachment, busy, onNotes, onMeetingFile, onQuickAdd, onPull, onOpenMeeting, onImportIcs, onPasteNotes, onEditTask, headActions, onTile } = props;
+  const [quick, setQuick] = useState("");
+  const [quickProject, setQuickProject] = useState(activeClientId);
+  const [quickPriority, setQuickPriority] = useState<TaskPriority>("normal");
+  useEffect(() => { setQuickProject(activeClientId); }, [activeClientId]);
+  const projectsInPlay = new Set(tonightTasks.map((task) => task.project_id).filter(Boolean)).size;
+  const blocked = tonightTasks.filter((task) => task.status === "blocked").length;
   const running = tonightTasks.find((task) => task.status === "in_progress");
-  return <div className="content-wrap">
-    <SectionHeading eyebrow="MONDAY NIGHT · SHIFT 01" title="My shift" description={`${formatDateLabel(shiftStart, "Asia/Kolkata")} · Your workday runs through 3:30 AM.`} action={shiftState === "active" ? <Button className="primary-action" onClick={onBegin} disabled={busy}><span className="button-signal" />{shift?.started_at ? "Shift is running" : "Start shift"}<ArrowRight size={16} /></Button> : null} />
-    <div className="clock-panel">
-      <div className="clock-main"><div className="clock-intro"><span className={`status-dot${shiftState === "active" ? " is-live" : ""}`} />{shiftState === "active" ? "YOUR SHIFT IS LIVE" : "BETWEEN SHIFTS"}</div><div className="clock-digits">{formatClock(now, "Asia/Kolkata")}<span> IST</span></div><div className="clock-context">{shiftState === "active" ? `${Math.max(0, Math.floor((shiftEnd.getTime() - now.getTime()) / 60_000))} minutes remain in this shift` : `Your next shift begins in ${timeLeftUntil(getShiftState(now) === "after" ? new Date(getShiftStart(now).getTime() + 24 * 60 * 60_000) : shiftStart, now)}`}</div></div>
-      <div className="clock-secondary"><div className="clock-secondary-top"><span>CLIENT TIME</span><span className="timezone-tag">EST / EDT · NEW YORK</span></div><div className="client-clock">{formatClock(now, "America/New_York")}<span> ET</span></div><div className="client-date">{formatDateLabel(now, "America/New_York")}</div></div>
-      <div className="shift-progress"><div className="progress-track"><span style={{ width: `${shiftState === "active" ? progress : 0}%` }} /></div><div className="progress-labels"><span>5:30 PM</span><strong>{shiftState === "active" ? `${Math.round(progress)}% THROUGH` : "10-HOUR WINDOW"}</strong><span>3:30 AM</span></div></div>
-      <div className="shift-meta"><div><span className="meta-icon"><ListChecks size={16} /></span><span><strong>{completedTonight} / {tonightTasks.length}</strong><small>Tasks done</small></span></div><div><span className="meta-icon"><FolderKanban size={16} /></span><span><strong>{shiftProjectCounts}</strong><small>Projects in play</small></span></div><div><span className="meta-icon"><Clock3 size={16} /></span><span><strong>{shift?.started_at ? formatClock(new Date(shift.started_at), "Asia/Kolkata") : "—"}</strong><small>Shift opened</small></span></div><div><span className="meta-icon"><Coffee size={16} /></span><span><strong>{formatClock(shiftEnd, "Asia/Kolkata")}</strong><small>Hard stop</small></span></div></div>
-    </div>
-
-    <div className="shift-columns">
-      <div className="primary-column">
-        <div className="block-heading"><div><div className="eyebrow">THE WORK, IN ORDER</div><h2>Tonight's focus <span className="count-badge">{tonightTasks.length}</span></h2></div><div className="inline-actions"><Button variant="ghost" size="icon" title="Show rollover tasks" aria-label="Show rollover tasks" onClick={onRollover}><ArrowDownToLine size={16} /></Button><Button variant="outline" size="sm" onClick={onAddTask}><Plus size={15} /> Add task</Button></div></div>
-        {showRollovers && rolloverTasks.length ? <div className="rollover-note"><ArrowDownToLine size={15} /><span><strong>Carried forward</strong> · {rolloverTasks.map((task) => task.title).join(" · ")}</span></div> : null}
-        {tonightTasks.length ? <div className="task-list">{tonightTasks.map((task, index) => <TaskCard key={task.id} task={task} project={projects.find((project) => project.id === task.project_id)} index={index} now={now} shiftEnd={shiftEnd} shiftActive={shiftState === "active"} attachments={attachments.filter((attachment) => attachment.task_id === task.id)} busy={busy} onTimer={() => onTaskTimer(task)} onComplete={(checked) => onTaskComplete(task, checked)} onStepChange={onStepChange} onAddStep={(title) => onAddStep(task, title)} onPaste={(file) => onPaste(file, task.id)} onAttachment={onAttachment} />)}</div> : <EmptyTasks onAdd={onAddTask} />}
-        <div className="paste-hint"><span className="paste-key">⌘ / CTRL</span><span>Paste a screenshot anywhere on this page to attach shift evidence.</span><button onClick={() => onPaste(new File([], ""), null)} aria-label="Choose screenshot to upload"><Upload size={14} /> Upload</button></div>
-        {running && shiftState !== "active" ? <div className="timer-outside-note"><Clock3 size={15} /> A running task timer will stop at the shift boundary.</div> : null}
+  const loggedSeconds = tonightTasks.reduce((sum, task) => sum + totalSeconds(task, now), 0);
+  const nextMeeting = upcomingMeetings.filter((meeting) => new Date(meeting.starts_at) > now).sort((a, b) => a.starts_at.localeCompare(b.starts_at))[0];
+  const taskPct = tonightTasks.length ? Math.round((completedTonight / tonightTasks.length) * 100) : 0;
+  const BUCKET_ORDER: PlanBucket[] = ["tomorrow", "next_7_days", "next_30_days", "backlog"];
+  const upNext = tasks.filter((task) => task.status !== "done" && task.planning_bucket !== "tonight").sort((a, b) => BUCKET_ORDER.indexOf(a.planning_bucket) - BUCKET_ORDER.indexOf(b.planning_bucket)).slice(0, 5);
+  const evidence = attachments.filter((attachment) => attachment.content_type.startsWith("image/") && attachment.previewUrl).slice(0, 6);
+  const progressByProject = projects.filter((project) => !project.archived_at).map((project) => ({ id: project.id, name: project.name, total: tonightTasks.filter((task) => task.project_id === project.id).length, done: tonightTasks.filter((task) => task.project_id === project.id && task.status === "done").length })).filter((item) => item.total > 0);
+  return <div className="content-wrap dash">
+    <div className="dash-head">
+      <div className="dash-head-main">
+      <div className="dash-title"><h1>Shift activity</h1><span className={`chip ${shiftState}`}>{shiftState === "active" ? "Live" : shiftState === "after" ? "Handover" : "Standby"}</span>{blocked ? <span className="chip warn">{blocked} blocked</span> : null}{running ? <span className="chip run">Timer running</span> : null}</div>
+      <p className="dash-meta">{completedTonight} done · {tonightTasks.length - completedTonight} open · {relativeDuration(loggedSeconds)} logged · {upcomingMeetings.length} meeting{upcomingMeetings.length === 1 ? "" : "s"}</p>
+      <div className="proj-strip"><div className="proj-item"><span>Tonight</span><div className="mini-bar"><span style={{ width: `${taskPct}%` }} /></div><em>{completedTonight}/{tonightTasks.length}</em></div>{progressByProject.map((item) => <div className="proj-item" key={item.id}><span>{item.name}</span><div className="mini-bar"><span style={{ width: `${Math.round((item.done / item.total) * 100)}%` }} /></div><em>{item.done}/{item.total}</em></div>)}</div>
       </div>
-      <aside className="secondary-column">
-        <div className="block-heading side-block-title"><div><div className="eyebrow">CLIENT TIME · ET</div><h2>Meetings <span className="count-badge">{upcomingMeetings.length}</span></h2></div><Button variant="ghost" size="icon" title="Add meeting" aria-label="Add meeting" onClick={onAddMeeting}><Plus size={16} /></Button></div>
-        {activeMeeting ? <div className="meeting-brief"><div className="brief-label"><Sparkles size={14} /> 5-MINUTE BRIEF</div><strong>{activeMeeting.title}</strong><span>{activeMeeting.client_name || "Client meeting"} · {formatClock(new Date(activeMeeting.starts_at), "America/New_York")} ET</span>{activeMeeting.dossier ? <p>{activeMeeting.dossier}</p> : <p>Add context to this meeting before the call.</p>}</div> : null}
-        {upcomingMeetings.length ? <div className="meeting-list">{upcomingMeetings.map((meeting) => <MeetingRow key={meeting.id} meeting={meeting} now={now} />)}</div> : <div className="empty-meetings"><CalendarDays size={19} /><span><strong>No meetings on your shift</strong><small>Calendar sync is unavailable. Add a meeting manually.</small></span><Button variant="outline" size="sm" onClick={onAddMeeting}><Plus size={14} /> Add</Button></div>}
-        <div className="side-divider" />
-        <div className="block-heading side-block-title"><div><div className="eyebrow">WRAP THE NIGHT</div><h2>End-of-shift handoff</h2></div><Timer size={16} className="muted-icon" /></div>
-        <div className="wrap-summary"><span className="wrap-completed"><CheckCircle2 size={16} /> {completedTonight} tasks done</span><span className="wrap-pending">{tonightTasks.length - completedTonight} to roll forward</span></div>
-        <Button variant="outline" className="wrap-launch" onClick={onWrap}><Clipboard size={15} /> Open 60-second wrap-up <ArrowRight size={15} /></Button>
-        <div className="rollover-foot"><ArrowLeftRight size={14} /><span>Next shift: <strong>{new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Kolkata", weekday: "long", month: "short", day: "numeric" }).format(nextShift)}</strong> <small>· weekend skip on</small></span></div>
-      </aside>
+      <div className="dash-head-actions">{headActions}</div>
+    </div>
+    <div className="stat-row">
+      <div className="stat-tile tile-wide"><span className="stat-label">Shift · 5:30 PM → 3:30 AM IST</span><strong className="stat-value">{shiftState === "active" ? `${Math.round(progress)}%` : shiftState === "after" ? "Done" : "Standby"}</strong><div className="progress-track"><span style={{ width: `${shiftState === "active" ? progress : 0}%` }} /></div></div>
+      <div className="stat-tile"><span className="stat-label">Tasks</span><strong className="stat-value tone-green">{completedTonight}<em>/{tonightTasks.length}</em></strong><div className="mini-bar"><span style={{ width: `${taskPct}%` }} /></div></div>
+      <button className="stat-tile link" onClick={() => onTile("archive")} title="Open the archive for this shift"><span className="stat-label">Logged</span><strong className="stat-value mono-sm tone-cyan">{relativeDuration(loggedSeconds)}</strong><small>{running ? "Timer running" : "Idle"}</small></button>
+      <button className="stat-tile link" onClick={() => onTile("meeting")} title="Open the next meeting"><span className="stat-label">Next meeting</span><strong className="stat-value mono-sm">{nextMeeting ? timeLeftUntil(new Date(nextMeeting.starts_at), now) : "—"}</strong><small>{nextMeeting?.title ?? "None scheduled"}</small></button>
+      <button className="stat-tile link" onClick={() => onTile("projects")} title="Open projects"><span className="stat-label">Projects · Blocked</span><strong className={`stat-value ${blocked ? "tone-amber" : "tone-cyan"}`}>{projectsInPlay}<em> · {blocked}</em></strong><small>in play tonight</small></button>
+    </div>
+    <div className="dash-grid">
+      <section className="card card-tasks">
+        <header className="card-head"><h2>Tonight <span className="count-badge">{tonightTasks.length}</span></h2><div className="card-actions"><Button variant="ghost" size="sm" onClick={onPasteNotes}><Clipboard size={14} /> Paste notes</Button><Button variant="outline" size="sm" onClick={onAddTask}><Plus size={14} /> Task</Button></div></header>
+        <form className="inline-add" onSubmit={(event) => { event.preventDefault(); const value = quick.trim(); if (!value) return; if (!quickProject && !/#[\w-]+/.test(value)) { toast.error("Choose a project for this task."); return; } onQuickAdd(value, quickProject, quickPriority); setQuick(""); }}>
+          <Input value={quick} onChange={(event) => setQuick(event.target.value)} aria-label="Quick add task" placeholder="Quick add — e.g. Fix backups tomorrow !high : check logs; verify" />
+          <select aria-label="Project" value={quickProject} onChange={(event) => setQuickProject(event.target.value)}><option value="">Project *</option>{projects.filter((project) => !project.archived_at).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
+          <select aria-label="Priority" value={quickPriority} onChange={(event) => setQuickPriority(event.target.value as TaskPriority)}><option value="high">High</option><option value="normal">Medium</option><option value="low">Low</option></select>
+          <Button type="submit" size="sm" disabled={!quick.trim() || busy}><Plus size={14} /></Button>
+        </form>
+        {tonightTasks.length ? <div className="task-list">{tonightTasks.map((task, index) => <TaskCard key={task.id} task={task} project={projects.find((project) => project.id === task.project_id)} index={index} now={now} shiftEnd={shiftEnd} shiftActive={shiftState === "active"} attachments={attachments.filter((attachment) => attachment.task_id === task.id)} busy={busy} onTimer={() => onTaskTimer(task)} onComplete={(checked) => onTaskComplete(task, checked)} onStepChange={onStepChange} onAddStep={(title) => onAddStep(task, title)} onPaste={(file) => onPaste(file, task.id)} onAttachment={onAttachment} onEdit={() => onEditTask(task)} />)}</div> : <EmptyTasks onAdd={onAddTask} />}
+        <div className="paste-hint"><span>Paste a screenshot to attach evidence</span><button onClick={() => onPaste(new File([], ""), null)} aria-label="Choose screenshot to upload"><Upload size={14} /> Upload</button></div>
+      </section>
+      <div className="dash-col">
+        <section className="card">
+          <header className="card-head"><h2>Meetings <span className="count-badge">{upcomingMeetings.length}</span></h2><div className="card-actions"><label className="icon-btn" title="Import .ics calendar file" aria-label="Import calendar file"><Download size={14} /><input type="file" accept=".ics,text/calendar" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) onImportIcs(file); event.target.value = ""; }} /></label><Button variant="ghost" size="icon" title="Add meeting" aria-label="Add meeting" onClick={onAddMeeting}><Plus size={15} /></Button></div></header>
+          {activeMeeting ? <div className="meeting-brief"><div className="brief-label"><Sparkles size={14} /> STARTING SOON</div><strong>{activeMeeting.title}</strong><span>{activeMeeting.client_name || "Client meeting"} · {formatClock(new Date(activeMeeting.starts_at), clientTz)} {zoneAbbr(new Date(activeMeeting.starts_at), clientTz)}</span>{activeMeeting.dossier ? <p>{activeMeeting.dossier}</p> : null}</div> : null}
+          {upcomingMeetings.length ? <div className="meeting-list">{upcomingMeetings.map((meeting) => <MeetingRow key={meeting.id} meeting={meeting} now={now} tz={clientTz} onOpen={() => onOpenMeeting(meeting)} onFile={(file) => onMeetingFile(meeting, file)} />)}</div> : <div className="empty-meetings"><CalendarDays size={18} /><span>No meetings tonight</span></div>}
+        </section>
+        <section className="card">
+          <header className="card-head"><h2>Up next <span className="count-badge">{upNext.length}</span></h2></header>
+          {upNext.length ? <div className="queue-list">{upNext.map((task) => <div className="queue-row" key={task.id}><span className="queue-bucket">{BUCKET_COPY[task.planning_bucket]}</span><span className="queue-title">{task.title}</span><Button variant="outline" size="sm" onClick={() => onPull(task)} disabled={busy}>Tonight</Button></div>)}</div> : <div className="empty-meetings"><ListChecks size={18} /><span>Nothing queued</span></div>}
+        </section>
+      </div>
+      <div className="dash-col">
+        <section className="card"><Scratchpad key={shift?.id ?? "none"} initial={shift?.focus_notes ?? ""} disabled={!shift} onSave={onNotes} /></section>
+        {evidence.length ? <section className="card"><header className="card-head"><h2>Evidence <span className="count-badge">{attachments.length}</span></h2></header><div className="thumb-grid">{evidence.map((attachment) => <button key={attachment.id} className="thumb" onClick={() => onAttachment(attachment.id)} title={attachment.file_name}><img src={attachment.previewUrl} alt={attachment.file_name} /></button>)}</div></section> : null}
+        <section className="card">
+          <header className="card-head"><h2>Handoff</h2></header>
+          <div className="wrap-summary"><span className="wrap-completed"><CheckCircle2 size={15} /> {completedTonight} done</span><span className="wrap-pending">{tonightTasks.length - completedTonight} rolling over</span></div>
+          <Button variant="outline" className="wrap-launch" onClick={onWrap}><Clipboard size={15} /> Wrap up shift <ArrowRight size={15} /></Button>
+          <div className="rollover-foot"><ArrowLeftRight size={14} /><span>Next shift <strong>{new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Kolkata", weekday: "short", month: "short", day: "numeric" }).format(nextShift)}</strong></span></div>
+        </section>
+      </div>
     </div>
   </div>;
 }
 
-function EmptyTasks({ onAdd }: { onAdd: () => void }) {
-  return <div className="empty-task-state"><div className="empty-mark"><ListChecks size={24} /></div><span className="eyebrow">CLEAR DESK, CLEAR HEAD</span><h3>Your queue starts here.</h3><p>Add tonight's first task when you're ready. No demo tasks, no borrowed data.</p><Button className="primary-action" onClick={onAdd}><Plus size={16} /> Add your first task</Button></div>;
+function Scratchpad({ initial, disabled, onSave }: { initial: string; disabled: boolean; onSave: (text: string) => void }) {
+  const [text, setText] = useState(initial);
+  const [state, setState] = useState<"saved" | "saving">("saved");
+  const last = useRef(initial);
+  useEffect(() => {
+    if (text === last.current) return;
+    setState("saving");
+    const timer = window.setTimeout(() => { last.current = text; onSave(text); setState("saved"); }, 800);
+    return () => window.clearTimeout(timer);
+  }, [text, onSave]);
+  return <div className="scratchpad">
+    <div className="block-heading side-block-title"><div><div className="eyebrow">SCRATCHPAD · {state === "saving" ? "SAVING…" : "AUTO-SAVED"}</div><h2>Shift notes</h2></div></div>
+    <Textarea aria-label="Shift scratchpad" disabled={disabled} value={text} onChange={(event) => setText(event.target.value)} placeholder={disabled ? "Begin the shift to start taking notes" : "Client pings, loose thoughts, handover bullets"} />
+  </div>;
 }
 
-function TaskCard({ task, project, index, now, shiftEnd, shiftActive, attachments, busy, onTimer, onComplete, onStepChange, onAddStep, onPaste, onAttachment }: {
-  task: Task; project?: Project; index: number; now: Date; shiftEnd: Date; shiftActive: boolean; attachments: Attachment[]; busy: boolean;
+function EmptyTasks({ onAdd }: { onAdd: () => void }) {
+  return <div className="empty-task-state"><div className="empty-mark"><ListChecks size={24} /></div><span className="eyebrow">CLEAR DESK, CLEAR HEAD</span><h3>No tasks yet</h3><Button className="primary-action" onClick={onAdd}><Plus size={16} /> Add task</Button></div>;
+}
+
+function TaskCard({ task, project, index, now, shiftEnd, shiftActive, attachments, busy, onTimer, onComplete, onStepChange, onAddStep, onPaste, onAttachment, onEdit }: {
+  task: Task; project?: Project; index: number; now: Date; shiftEnd: Date; shiftActive: boolean; attachments: Attachment[]; busy: boolean; onEdit: () => void;
   onTimer: () => void; onComplete: (checked: boolean) => void; onStepChange: (stepId: string, checked: boolean) => void; onAddStep: (title: string) => void; onPaste: (file: File) => void; onAttachment: (id: string) => void;
 }) {
   const [expanded, setExpanded] = useState(task.status === "in_progress");
   const [stepDraft, setStepDraft] = useState("");
-  const elapsed = task.elapsed_seconds + (task.status === "in_progress" && task.started_at ? Math.max(0, Math.floor((Math.min(now.getTime(), shiftEnd.getTime()) - new Date(task.started_at).getTime()) / 1000)) : 0);
+  const elapsed = totalSeconds(task, now);
+  void shiftEnd;
   const remaining = task.steps.filter((step) => !step.completed).length;
   const submitStep = (event: FormEvent) => { event.preventDefault(); const value = stepDraft.trim(); if (!value) return; onAddStep(value); setStepDraft(""); };
-  return <article className={`task-card${task.status === "in_progress" ? " task-running" : ""}`}>
+  return <article className={`task-card${task.status === "in_progress" ? " task-running" : ""}${task.status === "done" ? " is-done" : ""}`}>
     <div className="task-main-row"><div className="task-index">{String(index + 1).padStart(2, "0")}</div><Checkbox checked={task.status === "done"} onCheckedChange={(value) => onComplete(value === true)} aria-label={`Mark ${task.title} ${task.status === "done" ? "incomplete" : "complete"}`} disabled={busy} />
-      <button className="task-title-area" onClick={() => setExpanded(!expanded)}><span className={task.status === "done" ? "task-title is-done" : "task-title"}>{task.title}</span><span className="task-subtitle"><span>{project?.name ?? "Personal"}</span>{task.priority === "high" ? <span className="priority-chip">HIGH PRIORITY</span> : null}{task.rollover ? <span className="rollover-chip">ROLLED OVER</span> : null}</span></button>
-      <div className="task-trailing">{task.steps.length ? <button className="checklist-count" onClick={() => setExpanded(!expanded)}><ListChecks size={14} />{task.steps.length - remaining}/{task.steps.length}</button> : null}<span className={task.status === "in_progress" ? "task-timer timer-live" : "task-timer"}><Clock3 size={13} />{relativeDuration(elapsed)}</span><Button variant={task.status === "in_progress" ? "secondary" : "outline"} size="icon" aria-label={task.status === "in_progress" ? `Pause ${task.title}` : `Start timer for ${task.title}`} title={task.status === "in_progress" ? "Pause timer" : shiftActive ? "Start timer" : "Timers work only during shift hours"} onClick={onTimer} disabled={busy || (task.status !== "in_progress" && !shiftActive)}>{task.status === "in_progress" ? <Pause size={15} /> : <Play size={15} />}</Button><button className="expand-task" aria-label={`${expanded ? "Collapse" : "Expand"} ${task.title}`} onClick={() => setExpanded(!expanded)}><ChevronDown size={15} className={expanded ? "rotate-chevron" : ""} /></button></div>
+      <button className="task-title-area" onClick={() => setExpanded(!expanded)}><span className={task.status === "done" ? "task-title is-done" : "task-title"}>{task.title}</span><span className="task-subtitle"><span>{project?.name ?? "No project"}</span><span className={`priority-chip p-${task.priority}`}>{task.priority === "high" ? "HIGH" : task.priority === "low" ? "LOW" : "MEDIUM"}</span>{task.status === "blocked" ? <span className="chip warn small">BLOCKED</span> : null}{task.rollover ? <span className="rollover-chip">ROLLED OVER</span> : null}</span></button>
+      <div className="task-trailing">{task.steps.length ? <button className="checklist-count" onClick={() => setExpanded(!expanded)}><ListChecks size={14} />{task.steps.length - remaining}/{task.steps.length}</button> : null}<span className={task.status === "in_progress" ? "task-timer timer-live" : "task-timer"}><Clock3 size={13} />{relativeDuration(elapsed)}</span><Button className="timer-btn" variant={task.status === "in_progress" ? "secondary" : "outline"} size="icon" aria-label={task.status === "in_progress" ? `Pause ${task.title}` : `Start timer for ${task.title}`} title={task.status === "in_progress" ? "Pause timer" : shiftActive ? "Start timer" : "Timers work only during shift hours"} onClick={onTimer} disabled={busy || (task.status !== "in_progress" && !shiftActive)}>{task.status === "in_progress" ? <Pause size={15} /> : <Play size={15} />}</Button><button className="icon-mini" aria-label={`Edit ${task.title}`} title="Edit task" onClick={onEdit}><Pencil size={14} /></button><button className="expand-task" aria-label={`${expanded ? "Collapse" : "Expand"} ${task.title}`} onClick={() => setExpanded(!expanded)}><ChevronDown size={15} className={expanded ? "rotate-chevron" : ""} /></button></div>
     </div>
     {expanded ? <div className="task-details"><p className="task-description">{task.description || "No notes added yet."}</p>{task.steps.length ? <div className="step-list">{task.steps.map((step) => <label className={`step-row${step.completed ? " step-done" : ""}`} key={step.id}><Checkbox checked={step.completed} onCheckedChange={(value) => onStepChange(step.id, value === true)} aria-label={`Mark step ${step.title}`} /><span>{step.title}</span></label>)}</div> : null}<form className="add-step-row" onSubmit={submitStep}><Input value={stepDraft} onChange={(event) => setStepDraft(event.target.value)} aria-label={`Add a checklist step to ${task.title}`} placeholder="Add a step…" /><Button variant="ghost" size="icon" type="submit" aria-label="Add checklist step" disabled={!stepDraft.trim()}><Plus size={16} /></Button></form>{attachments.length ? <div className="task-attachments">{attachments.map((attachment) => <button key={attachment.id} onClick={() => onAttachment(attachment.id)}><FileImage size={14} />{attachment.file_name}</button>)}</div> : null}<label className="task-attach"><ImagePlus size={14} /> Attach evidence<input type="file" accept="image/*" aria-label={`Attach evidence to ${task.title}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) onPaste(file); event.target.value = ""; }} /></label></div> : null}
   </article>;
 }
 
-function MeetingRow({ meeting, now }: { meeting: Meeting; now: Date }) {
-  const delta = new Date(meeting.starts_at).getTime() - now.getTime();
-  return <div className={`meeting-row${delta <= 0 ? " meeting-past" : ""}`}><div className="meeting-time">{formatClock(new Date(meeting.starts_at), "America/New_York")}<small>ET</small></div><div className="meeting-marker"><span /></div><div className="meeting-detail"><strong>{meeting.title}</strong><span>{meeting.client_name || "Client"}{meeting.source === "outlook" ? " · Outlook" : ""}</span>{meeting.action_items.length ? <small><Check size={12} /> {meeting.action_items.length} action items</small> : null}</div><span className="meeting-duration">{meeting.ends_at ? formatClock(new Date(meeting.ends_at), "America/New_York") : ""}</span></div>;
-}
-
-function PlannerSection({ userId, now, projects, tasks, meetings, templates, bucket, setBucket, busy, onRun, onModal, onDataChange, onTaskTimer, shiftState }: {
-  userId: string; now: Date; projects: Project[]; tasks: Task[]; meetings: Meeting[]; templates: WorkflowTemplate[]; bucket: PlanBucket;
-  setBucket: (bucket: PlanBucket) => void; busy: boolean; onRun: (action: () => Promise<unknown>, text?: string) => Promise<void>;
-  onModal: (modal: Modal) => void; onDataChange: () => Promise<void>; onTaskTimer: (task: Task) => void; shiftState: ReturnType<typeof getShiftState>;
-}) {
-  const [query, setQuery] = useState("");
-  const [projectFilter, setProjectFilter] = useState("all");
-  const [showArchived, setShowArchived] = useState(false);
-  const [templateName, setTemplateName] = useState("");
-  const [templateSteps, setTemplateSteps] = useState("");
-  const [selectedProject, setSelectedProject] = useState("");
-  const [templateOpen, setTemplateOpen] = useState(false);
-  const [quickTask, setQuickTask] = useState("");
-  const [quickBucket, setQuickBucket] = useState<PlanBucket>("tonight");
-  const [quickProject, setQuickProject] = useState("");
-  const [quickSteps, setQuickSteps] = useState("");
-  const [showQuickSteps, setShowQuickSteps] = useState(false);
-  const visibleTasks = tasks.filter((task) => task.planning_bucket === bucket && task.status !== "done")
-    .filter((task) => projectFilter === "all" || task.project_id === projectFilter)
-    .filter((task) => `${task.title} ${task.description}`.toLowerCase().includes(query.toLowerCase()));
-  const archived = useMemo(() => projects.filter((project) => project.archived_at), [projects]);
-  const visibleProjects = projects.filter((project) => Boolean(project.archived_at) === showArchived);
-
-  async function submitQuickTask(event: FormEvent) {
-    event.preventDefault();
-    const title = quickTask.trim();
-    if (!title) return;
-    const plan = quickBucket === "tonight" ? getShiftState(now) === "active" : true;
-    if (!plan && quickBucket === "tonight") {
-      toast.error("Tonight's queue is available only during your 5:30 PM–3:30 AM IST shift.");
-      return;
-    }
-    const plannedDate = quickBucket === "tonight" ? getShiftDateKey(now) : quickBucket === "tomorrow" ? getShiftDateKeyFromStart(getNextShiftDate(now)) : null;
-    const parsedSteps = quickSteps.split("\n").map((step) => step.trim()).filter(Boolean);
-    await onRun(async () => {
-      await createTask(userId, {
-        title, description: "", project_id: quickProject || null, planning_bucket: quickBucket, planned_date: plannedDate,
-        priority: "normal", steps: parsedSteps, shift_id: quickBucket === "tonight" ? null : null,
-      });
-      setQuickTask(""); setQuickSteps(""); setShowQuickSteps(false);
-    }, "Task added");
-  }
-
-  async function saveTemplate(event: FormEvent) {
-    event.preventDefault();
-    const name = templateName.trim();
-    if (!name) return;
-    const steps = templateSteps.split("\n").map((step) => step.trim()).filter(Boolean);
-    await onRun(async () => {
-      await createTemplate(userId, { name, project_id: selectedProject || null, steps });
-      setTemplateName(""); setTemplateSteps(""); setTemplateOpen(false);
-    }, "Workflow saved");
-  }
-
-  async function startFromTemplate(template: WorkflowTemplate) {
-    await onRun(async () => {
-      const shiftDate = bucket === "tonight" && shiftState === "active" ? getShiftDateKey(now) : bucket === "tomorrow" ? getShiftDateKeyFromStart(getNextShiftDate(now)) : null;
-      await createTask(userId, {
-        title: template.name, description: "", project_id: template.project_id, planning_bucket: bucket,
-        planned_date: shiftDate, priority: "normal", steps: template.steps, shift_id: null,
-      });
-    }, "Task started from workflow");
-  }
-
-  async function archiveProject(project: Project, archivedAt: string | null) {
-    await onRun(() => saveProject(userId, project.id, { archived_at: archivedAt }), archivedAt ? "Project archived" : "Project restored");
-    await onDataChange();
-  }
-
-  const projectTasks = (project: Project) => tasks.filter((task) => task.project_id === project.id && task.status !== "done").length;
-  const projectMeetings = (project: Project) => meetings.filter((meeting) => meeting.project_id === project.id && new Date(meeting.starts_at) >= now).length;
-
-  return <div className="content-wrap">
-    <SectionHeading eyebrow="THE BIGGER PICTURE" title="Projects & planning" description="Keep client work in view and put every next step in its right place." action={<Button className="primary-action" onClick={() => onModal("project")}><Plus size={16} /> Add project</Button>} />
-    <section className="quick-add-panel"><div className="quick-add-head"><div><div className="eyebrow"><WandSparkles size={13} /> QUICK ADD</div><strong>Put it somewhere useful.</strong></div><span>One line is enough</span></div>
-      <form className="quick-add-form" onSubmit={submitQuickTask}><Input value={quickTask} onChange={(event) => setQuickTask(event.target.value)} aria-label="Task title" placeholder="e.g. Review the launch page before the client call" /><select value={quickBucket} onChange={(event) => setQuickBucket(event.target.value as PlanBucket)} aria-label="Planning window">{BUCKET_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select><select value={quickProject} onChange={(event) => setQuickProject(event.target.value)} aria-label="Client project"><option value="">Personal / no project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><Button type="submit" disabled={!quickTask.trim() || busy}><Plus size={15} /> Add task</Button></form>
-      <button className="quick-add-substeps-toggle" onClick={() => setShowQuickSteps(!showQuickSteps)}><ListChecks size={13} /> {showQuickSteps ? "Hide checklist" : "Add checklist steps"} <ChevronDown size={13} /></button>
-      {showQuickSteps ? <Textarea className="quick-add-steps" aria-label="Checklist steps" value={quickSteps} onChange={(event) => setQuickSteps(event.target.value)} placeholder="One step per line" /> : null}
-    </section>
-
-    <div className="planner-bucket-tabs" role="tablist" aria-label="Planning horizon">{BUCKET_OPTIONS.map((option) => <button key={option.id} role="tab" aria-selected={bucket === option.id} onClick={() => setBucket(option.id)}>{option.label}<small>{tasks.filter((task) => task.planning_bucket === option.id && task.status !== "done").length}</small></button>)}</div>
-    <div className="planner-filters"><div className="search-field"><Search size={15} /><Input aria-label="Search tasks" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search tasks" /></div><select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)} aria-label="Filter by project"><option value="all">All projects</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></div>
-    {visibleTasks.length ? <div className="planner-task-list">{visibleTasks.map((task, index) => <TaskCard key={task.id} task={task} project={projects.find((project) => project.id === task.project_id)} index={index} now={now} shiftEnd={getShiftEnd(now)} shiftActive={shiftState === "active"} attachments={[]} busy={busy} onTimer={() => onTaskTimer(task)} onComplete={(checked) => void onRun(() => updateTask(userId, task.id, checked ? taskStatusChanges("done") : { status: "queued" }), checked ? "Task completed" : "Task reopened")} onStepChange={(stepId, checked) => void onRun(() => setStepComplete(userId, stepId, checked))} onAddStep={(title) => void onRun(() => addTaskStep(userId, task.id, title, task.steps.length), "Checklist item added")} onPaste={() => toast.error("Open this task in My Shift to attach evidence.")} onAttachment={() => undefined} />)}</div> : <div className="empty-planner"><div className="empty-mark"><CalendarDays size={21} /></div><h3>Nothing on the board.</h3><p>Tasks you put in {BUCKET_COPY[bucket].toLowerCase()} will land here.</p><Button variant="outline" onClick={() => document.querySelector<HTMLInputElement>('[aria-label="Task title"]')?.focus()}><Plus size={15} /> Add one above</Button></div>}
-
-    <div className="planner-divider" />
-    <div className="directory-head"><div><div className="eyebrow">CLIENT DIRECTORY</div><h2>Projects <span className="count-badge">{visibleProjects.length}</span></h2></div><div className="inline-actions"><button className="archive-toggle" onClick={() => setShowArchived(!showArchived)}><Archive size={14} /> {showArchived ? "Active" : "Archived"} <span>{showArchived ? archived.length : ""}</span></button><Button variant="outline" size="sm" onClick={() => onModal("project")}><Plus size={15} /> New project</Button></div></div>
-    {visibleProjects.length ? <div className="project-directory">{visibleProjects.map((project, index) => <article className="project-card" key={project.id}><div className="project-card-top"><span className={`project-monogram ${BRAND_MARKS[index % BRAND_MARKS.length]}`}>{project.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</span><div className="project-card-title"><strong>{project.name}</strong><span>{project.client_name || "Client details not set"}</span></div><Button variant="ghost" size="icon" aria-label={`${project.archived_at ? "Restore" : "Archive"} ${project.name}`} title={project.archived_at ? "Restore project" : "Archive project"} disabled={busy} onClick={() => void archiveProject(project, project.archived_at ? null : new Date().toISOString())}>{project.archived_at ? <ArrowDownToLine size={15} /> : <Archive size={15} />}</Button></div><div className="project-attrs"><span><Users size={13} /> {project.client_name || "Unassigned client"}</span><span><Clock3 size={13} /> {project.timezone.replaceAll("_", " ")}</span></div>{project.domain_rules.length ? <div className="domain-tags">{project.domain_rules.map((rule) => <span key={rule}>{rule}</span>)}</div> : <p className="domain-empty">No email-domain rules added</p>}<div className="project-card-footer"><span><ListChecks size={13} /> {projectTasks(project)} open</span><span><CalendarDays size={13} /> {projectMeetings(project)} upcoming</span><span className="project-swatch" /></div></article>)}</div> : <div className="empty-directory"><FolderKanban size={22} /><span><strong>{showArchived ? "No archived projects" : "Your client directory is empty."}</strong><small>{showArchived ? "Archived projects appear here." : "Add a project to group tasks, time zones, and client context."}</small></span><Button variant="outline" size="sm" onClick={() => onModal("project")}><Plus size={14} /> Add project</Button></div>}
-
-    <div className="planner-divider" />
-    <div className="directory-head"><div><div className="eyebrow">REPEATABLE WORK</div><h2>Workflow templates <span className="count-badge">{templates.length}</span></h2></div><Button variant="outline" size="sm" onClick={() => setTemplateOpen(!templateOpen)}><Plus size={15} /> New template</Button></div>
-    {templateOpen ? <form className="template-form" onSubmit={(event) => void saveTemplate(event)}><Input aria-label="Workflow name" value={templateName} onChange={(event) => setTemplateName(event.target.value)} placeholder="Workflow name" required /><select aria-label="Workflow project" value={selectedProject} onChange={(event) => setSelectedProject(event.target.value)}><option value="">Any project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><Textarea aria-label="Workflow steps" value={templateSteps} onChange={(event) => setTemplateSteps(event.target.value)} placeholder="One checklist step per line" /><div className="inline-actions"><Button type="button" variant="ghost" onClick={() => setTemplateOpen(false)}>Cancel</Button><Button type="submit" disabled={!templateName.trim() || busy}>Save workflow</Button></div></form> : null}
-    {templates.length ? <div className="template-list">{templates.map((template) => <div className="template-row" key={template.id}><span className="template-icon"><ListChecks size={16} /></span><div><strong>{template.name}</strong><small>{template.steps.length} checklist steps · {projects.find((project) => project.id === template.project_id)?.name ?? "Any project"}</small></div><Button variant="outline" size="sm" onClick={() => void startFromTemplate(template)} disabled={busy}>Use for {BUCKET_COPY[bucket].toLowerCase()}<ArrowRight size={14} /></Button></div>)}</div> : <div className="empty-template"><WandSparkles size={17} /><span>Saved checklists are ready when you have a process to repeat.</span></div>}
+function MeetingRow({ meeting, now, tz, onFile, onOpen }: { meeting: Meeting; now: Date; tz: string; onFile: (file: File) => void; onOpen: () => void }) {
+  const start = new Date(meeting.starts_at);
+  const delta = start.getTime() - now.getTime();
+  return <div className={`meeting-row${delta <= 0 ? " meeting-past" : ""}`} role="button" tabIndex={0} onClick={onOpen} onKeyDown={(event) => { if (event.key === "Enter") onOpen(); }}>
+    <div className="meeting-time">{formatClock(start, tz)}<small>{zoneAbbr(start, tz)} · {formatClock(start, "Asia/Kolkata")} IST</small></div>
+    <div className="meeting-detail"><strong>{meeting.title}</strong><span>{meeting.client_name || "Client"}{meeting.action_items.length ? ` · ${meeting.action_items.length} actions` : ""}</span></div>
+    <label className="meeting-attach" title="Attach a file to this meeting" onClick={(event) => event.stopPropagation()}><Upload size={13} /><input type="file" hidden aria-label={`Attach file to ${meeting.title}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) onFile(file); event.target.value = ""; }} /></label>
   </div>;
 }
 
-function ArchiveSection({ data, now, month, setMonth, day, setDay, search, setSearch, onAttachment }: {
-  data: TrackerData; now: Date; month: Date; setMonth: (date: Date) => void; day: string | null; setDay: (date: string | null) => void; search: string; setSearch: (query: string) => void; onAttachment: (id: string) => void;
+function ArchiveSection({ clientTz, data, now, month, setMonth, day, setDay, search, setSearch, onAttachment }: {
+  clientTz: string; data: TrackerData; now: Date; month: Date; setMonth: (date: Date) => void; day: string | null; setDay: (date: string | null) => void; search: string; setSearch: (query: string) => void; onAttachment: (id: string) => void;
 }) {
+  const [kind, setKind] = useState<"all" | "tasks" | "meetings" | "evidence">("all");
+  const [projectFilter, setProjectFilter] = useState("all");
+  const [view, setView] = useState<"calendar" | "list">("calendar");
+  const inProject = (id: string | null | undefined) => projectFilter === "all" || id === projectFilter;
   const monthStart = new Date(Date.UTC(month.getUTCFullYear(), month.getUTCMonth(), 1, 12));
   const year = monthStart.getUTCFullYear();
   const monthIndex = monthStart.getUTCMonth();
@@ -575,30 +750,82 @@ function ArchiveSection({ data, now, month, setMonth, day, setDay, search, setSe
   }
   const activeDay = day ?? (monthIndex === now.getMonth() && year === now.getFullYear() ? getShiftDateKey(now) : null);
   const selectedShift = data.shifts.find((shift) => shift.shift_date === activeDay);
-  const visibleTasks = data.tasks.filter((task) => !activeDay || task.planned_date === activeDay || task.shift_id === selectedShift?.id);
-  const visibleMeetings = data.meetings.filter((meeting) => !activeDay || getShiftDateKey(new Date(meeting.starts_at)) === activeDay);
+  const visibleTasks = data.tasks.filter((task) => (!activeDay || task.planned_date === activeDay || task.shift_id === selectedShift?.id) && inProject(task.project_id));
+  const visibleMeetings = data.meetings.filter((meeting) => (!activeDay || getShiftDateKey(new Date(meeting.starts_at)) === activeDay) && inProject(meeting.project_id));
   const visibleAttachments = data.attachments.filter((attachment) => !activeDay || attachment.shift_id === selectedShift?.id || attachment.task_id && visibleTasks.some((task) => task.id === attachment.task_id));
   const query = search.trim().toLowerCase();
-  const searchedTasks = query ? data.tasks.filter((task) => `${task.title} ${task.description} ${task.steps.map((step) => step.title).join(" ")}`.toLowerCase().includes(query)) : [];
-  const searchedMeetings = query ? data.meetings.filter((meeting) => `${meeting.title} ${meeting.client_name} ${meeting.notes} ${meeting.agenda} ${meeting.dossier} ${meeting.action_items.join(" ")}`.toLowerCase().includes(query)) : [];
-  const searchedAttachments = query ? data.attachments.filter((attachment) => `${attachment.file_name} ${attachment.note} ${attachment.ocr_text}`.toLowerCase().includes(query)) : [];
+  const searchedTasks = query && (kind === "all" || kind === "tasks") ? data.tasks.filter((task) => inProject(task.project_id) && `${task.title} ${task.description} ${task.steps.map((step) => step.title).join(" ")}`.toLowerCase().includes(query)) : [];
+  const searchedMeetings = query && (kind === "all" || kind === "meetings") ? data.meetings.filter((meeting) => inProject(meeting.project_id) && `${meeting.title} ${meeting.client_name} ${meeting.notes} ${meeting.agenda} ${meeting.dossier} ${meeting.action_items.join(" ")}`.toLowerCase().includes(query)) : [];
+  const searchedAttachments = query && (kind === "all" || kind === "evidence") ? data.attachments.filter((attachment) => (projectFilter === "all" || inProject(data.tasks.find((task) => task.id === attachment.task_id)?.project_id)) && `${attachment.file_name} ${attachment.note} ${attachment.ocr_text}`.toLowerCase().includes(query)) : [];
   const visibleDatedTasks = visibleTasks.filter((task) => !query || `${task.title} ${task.description} ${task.steps.map((step) => step.title).join(" ")}`.toLowerCase().includes(query));
   const visibleDatedMeetings = visibleMeetings.filter((meeting) => !query || `${meeting.title} ${meeting.client_name} ${meeting.notes} ${meeting.agenda} ${meeting.dossier} ${meeting.action_items.join(" ")}`.toLowerCase().includes(query));
   const visibleDatedAttachments = visibleAttachments.filter((attachment) => !query || `${attachment.file_name} ${attachment.note} ${attachment.ocr_text}`.toLowerCase().includes(query));
   const selectedDate = activeDay ? new Date(`${activeDay}T12:00:00`) : null;
-  return <div className="content-wrap">
-    <SectionHeading eyebrow="THE RECORD, NOT JUST THE RESULT" title="Archive & audit" description="Replay a shift, revisit the notes, and find a detail across your saved work." />
-    <section className="archive-search"><Search size={17} /><Input aria-label="Search tasks, meeting notes, and evidence" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search tasks, meeting notes, and saved evidence…" /><span><Command size={12} /> K</span></section>
+  const monthKey = `${year}-${String(monthIndex + 1).padStart(2, "0")}`;
+  const monthTasks = data.tasks.filter((task) => (task.planned_date ?? "").startsWith(monthKey) || (task.completed_at ?? "").startsWith(monthKey));
+  const monthSeconds = monthTasks.reduce((sum, task) => sum + task.elapsed_seconds, 0);
+  const monthStats: Array<[string, string, string]> = [
+    ["Shifts", String(data.shifts.filter((shift) => shift.shift_date.startsWith(monthKey)).length), "this month"],
+    ["Completed", String(monthTasks.filter((task) => task.status === "done").length), `of ${monthTasks.length} tasks`],
+    ["Logged", monthSeconds < 3600 ? `${Math.round(monthSeconds / 60)}m` : `${(monthSeconds / 3600).toFixed(1)}h`, "task time"],
+    ["Meetings", String(data.meetings.filter((meeting) => getShiftDateKey(new Date(meeting.starts_at)).startsWith(monthKey)).length), "attended"],
+    ["Evidence", String(data.attachments.filter((attachment) => (attachment.created_at ?? "").startsWith(monthKey)).length), "files saved"],
+  ];
+  const secondsByProject = new Map<string, number>();
+  for (const task of monthTasks) if (task.project_id) secondsByProject.set(task.project_id, (secondsByProject.get(task.project_id) ?? 0) + task.elapsed_seconds);
+  const maxSeconds = Math.max(1, ...secondsByProject.values());
+  const projectBars = [...secondsByProject.entries()].map(([id, seconds]) => ({ id, name: data.projects.find((project) => project.id === id)?.name ?? "Unknown", pct: Math.max(4, (seconds / maxSeconds) * 100), label: seconds < 3600 ? `${Math.round(seconds / 60)}m` : `${(seconds / 3600).toFixed(1)}h` })).sort((a, b) => b.pct - a.pct).slice(0, 6);
+  const shiftKeys = [...new Set([...data.shifts.map((shift) => shift.shift_date), ...data.tasks.map((task) => task.planned_date ?? "")])].filter((key) => key.startsWith(monthKey)).sort().reverse();
+  const shiftRows = shiftKeys.map((key) => {
+    const shiftRow = data.shifts.find((shift) => shift.shift_date === key);
+    const list = data.tasks.filter((task) => (task.planned_date === key || (shiftRow && task.shift_id === shiftRow.id)) && inProject(task.project_id));
+    return { key, label: new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" }).format(new Date(`${key}T12:00:00Z`)), wrapped: Boolean(shiftRow?.ended_at), done: list.filter((task) => task.status === "done").length, total: list.length, time: shortDuration(list.reduce((sum, task) => sum + task.elapsed_seconds, 0)) };
+  });
+  function copyStandup() {
+    const done = visibleDatedTasks.filter((task) => task.status === "done");
+    const open = visibleDatedTasks.filter((task) => task.status !== "done");
+    const text = [`Shift ${activeDay}`, "", "Done:", ...done.map((task) => `• ${task.title}`), "", "Open:", ...open.map((task) => `• ${task.title}`), ...(selectedShift?.wrap_up ? ["", "Notes:", selectedShift.wrap_up] : [])].join("\n");
+    void navigator.clipboard.writeText(text).then(() => toast.success("Standup copied"));
+  }
+  return <div className="content-wrap archive">
+    <div className="stat-row stat-row-5">{monthStats.map(([label, value, hint]) => <div className="stat-tile" key={label}><span className="stat-label">{label}</span><strong className="stat-value">{value}</strong><small>{hint}</small></div>)}</div>
+    <section className="archive-search"><Search size={17} /><Input aria-label="Search tasks, meeting notes, and evidence" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search tasks, meeting notes, and saved evidence…" /><span><Command size={12} /> K</span><Button variant="outline" size="sm" onClick={() => downloadText("nightshift-tasks.csv", tasksToCsv(data), "text/csv")}><Download size={14} /> CSV</Button><Button variant="outline" size="sm" onClick={() => downloadText("nightshift-audit.json", auditToJson(data), "application/json")}><Download size={14} /> JSON</Button></section>
+    <div className="toolbar archive-filters">
+      <div className="segmented" role="tablist" aria-label="Result type">{(["all", "tasks", "meetings", "evidence"] as const).map((value) => <button key={value} role="tab" aria-selected={kind === value} onClick={() => setKind(value)}>{value}</button>)}</div>
+      <select aria-label="Filter by project" value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}><option value="all">All projects</option>{data.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
+      <div className="segmented" role="tablist" aria-label="Shift view">{(["calendar", "list"] as const).map((value) => <button key={value} role="tab" aria-selected={view === value} onClick={() => setView(value)}>{value}</button>)}</div>
+    </div>
     {query ? <div className="global-search-results"><div className="eyebrow">SEARCH RESULTS · {searchedTasks.length + searchedMeetings.length + searchedAttachments.length}</div>{searchedTasks.map((task) => <div className="search-result" key={`task-${task.id}`}><ListChecks size={16} /><div><strong>{task.title}</strong><small>Task · {task.planned_date ?? "No shift date"} · {task.status.replace("_", " ")}</small></div></div>)}{searchedMeetings.map((meeting) => <div className="search-result" key={`meeting-${meeting.id}`}><CalendarDays size={16} /><div><strong>{meeting.title}</strong><small>Meeting · {formatDateLabel(new Date(meeting.starts_at), "Asia/Kolkata")} · {meeting.notes || meeting.client_name || "No notes"}</small></div></div>)}{searchedAttachments.map((attachment) => <button className="search-result" key={`attachment-${attachment.id}`} onClick={() => onAttachment(attachment.id)}><FileImage size={16} /><span><strong>{attachment.file_name}</strong><small>Evidence · {attachment.note || attachment.ocr_text || "No note"}</small></span></button>)}{!searchedTasks.length && !searchedMeetings.length && !searchedAttachments.length ? <div className="empty-search">No matching tasks, notes, or evidence.</div> : null}</div> : <div className="archive-layout">
-      <section className="calendar-panel"><div className="calendar-heading"><div><div className="eyebrow">SHIFT CALENDAR</div><h2>{new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric", timeZone: "UTC" }).format(monthStart)}</h2></div><div className="calendar-nav"><Button variant="ghost" size="icon" aria-label="Previous month" onClick={() => setMonth(new Date(Date.UTC(year, monthIndex - 1, 1, 12)))}><ChevronDown size={16} className="rotate-left" /></Button><Button variant="ghost" size="icon" aria-label="Next month" onClick={() => setMonth(new Date(Date.UTC(year, monthIndex + 1, 1, 12)))}><ChevronDown size={16} className="rotate-right" /></Button></div></div><div className="calendar-grid calendar-weekdays">{["SU", "MO", "TU", "WE", "TH", "FR", "SA"].map((label) => <span key={label}>{label}</span>)}</div><div className="calendar-grid">{days.map((date, index) => { const dateKey = date === null ? null : getShiftDateKeyFromCivilDate(year, monthIndex, date); const hasShift = dateKey !== null && shiftDayKeys.has(dateKey); const count = dateKey ? taskCountByDay.get(dateKey) ?? 0 : 0; const isSelected = dateKey === activeDay; return date === null ? <span className="calendar-blank" key={`empty-${index}`} /> : <button key={dateKey} className={`calendar-day${isSelected ? " calendar-selected" : ""}${hasShift ? " has-shift" : ""}`} onClick={() => setDay(isSelected ? null : dateKey)} aria-label={`${dateKey}${hasShift ? ", saved shift" : ""}`} aria-pressed={isSelected}><span>{date}</span>{hasShift || count ? <i>{count || "·"}</i> : null}</button>; })}</div><div className="calendar-legend"><span><i className="legend-shift" /> Saved shift</span><span><i className="legend-task" /> Tasks</span></div></section>
-      <section className="replay-panel"><div className="eyebrow">SHIFT REPLAY</div><h2>{selectedDate ? formatDateLabel(selectedDate, "Asia/Kolkata") : "Choose a day to replay"}</h2>{selectedDate ? <><div className="replay-time"><Clock3 size={14} /> 5:30 PM – 3:30 AM IST <span>·</span> 12:00 PM – 10:00 PM ET*</div><div className="replay-section"><div className="replay-heading"><ListChecks size={15} /> TASKS <span>{visibleDatedTasks.length}</span></div>{visibleDatedTasks.length ? visibleDatedTasks.map((task) => <div className="replay-task" key={task.id}><span className={`replay-check${task.status === "done" ? " done" : ""}`}>{task.status === "done" ? <Check size={11} /> : null}</span><span><strong>{task.title}</strong><small>{task.status.replace("_", " ")} · {relativeDuration(task.elapsed_seconds)}{task.rollover ? " · rolled over" : ""}</small></span></div>) : <p className="replay-empty">No saved tasks for this shift.</p>}</div><div className="replay-section"><div className="replay-heading"><CalendarDays size={15} /> MEETINGS <span>{visibleDatedMeetings.length}</span></div>{visibleDatedMeetings.length ? visibleDatedMeetings.map((meeting) => <div className="replay-meeting" key={meeting.id}><strong>{meeting.title}</strong><small>{formatClock(new Date(meeting.starts_at), "America/New_York")} ET · {meeting.client_name || "Client"}</small>{meeting.notes ? <p>{meeting.notes}</p> : null}{meeting.action_items.length ? <ul>{meeting.action_items.map((item) => <li key={item}>{item}</li>)}</ul> : null}</div>) : <p className="replay-empty">No meeting notes saved.</p>}</div><div className="replay-section"><div className="replay-heading"><FileImage size={15} /> ATTACHMENTS <span>{visibleDatedAttachments.length}</span></div>{visibleDatedAttachments.length ? visibleDatedAttachments.map((attachment) => <button className="replay-attachment" key={attachment.id} onClick={() => onAttachment(attachment.id)}><FileImage size={15} /><span><strong>{attachment.file_name}</strong><small>{attachment.note || attachment.ocr_text || "Saved evidence"}</small></span><ArrowRight size={14} /></button>) : <p className="replay-empty">No saved evidence for this shift.</p>}</div>{selectedShift?.wrap_up ? <div className="replay-wrap"><div className="eyebrow">SHIFT WRAP-UP</div><p>{selectedShift.wrap_up}</p></div> : null}<p className="archive-note">*New York offset changes with daylight saving time.</p></> : <div className="replay-empty large"><History size={21} /><span>Select a calendar date to inspect its shift record.</span></div>}</section>
+      <aside className="archive-side">
+      {view === "calendar" ? <section className="card calendar-panel"><div className="calendar-heading"><div><h2>{new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric", timeZone: "UTC" }).format(monthStart)}</h2></div><div className="calendar-nav"><Button variant="ghost" size="icon" aria-label="Previous month" onClick={() => setMonth(new Date(Date.UTC(year, monthIndex - 1, 1, 12)))}><ChevronDown size={16} className="rotate-left" /></Button><Button variant="ghost" size="icon" aria-label="Next month" onClick={() => setMonth(new Date(Date.UTC(year, monthIndex + 1, 1, 12)))}><ChevronDown size={16} className="rotate-right" /></Button></div></div><div className="calendar-grid calendar-weekdays">{["SU", "MO", "TU", "WE", "TH", "FR", "SA"].map((label) => <span key={label}>{label}</span>)}</div><div className="calendar-grid">{days.map((date, index) => { const dateKey = date === null ? null : getShiftDateKeyFromCivilDate(year, monthIndex, date); const hasShift = dateKey !== null && shiftDayKeys.has(dateKey); const count = dateKey ? taskCountByDay.get(dateKey) ?? 0 : 0; const isSelected = dateKey === activeDay; return date === null ? <span className="calendar-blank" key={`empty-${index}`} /> : <button key={dateKey} className={`calendar-day${isSelected ? " calendar-selected" : ""}${hasShift ? " has-shift" : ""}`} style={{ "--heat": Math.min(1, count / 6) } as React.CSSProperties} onClick={() => setDay(isSelected ? null : dateKey)} aria-label={`${dateKey}${hasShift ? ", saved shift" : ""}`} aria-pressed={isSelected}><span>{date}</span>{hasShift || count ? <i>{count || "·"}</i> : null}</button>; })}</div><div className="calendar-legend"><span><i className="legend-shift" /> Saved shift</span><span><i className="legend-task" /> Tasks</span></div></section> : <section className="card shift-list"><header className="card-head"><h2>Shifts <span className="count-badge">{shiftRows.length}</span></h2></header>{shiftRows.length ? <div className="row-list">{shiftRows.map((row) => <button className={`row-item shift-row${row.key === activeDay ? " selected" : ""}`} key={row.key} onClick={() => setDay(row.key)}><span className="row-title">{row.label}</span><span className={`pill${row.wrapped ? " ok" : ""}`}>{row.wrapped ? "Wrapped" : "Open"}</span><small>{row.done}/{row.total}</small><small>{row.time}</small></button>)}</div> : <p className="replay-empty">No shifts this month.</p>}<div className="calendar-nav list-nav"><Button variant="ghost" size="sm" onClick={() => setMonth(new Date(Date.UTC(year, monthIndex - 1, 1, 12)))}>← Prev</Button><span>{new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric", timeZone: "UTC" }).format(monthStart)}</span><Button variant="ghost" size="sm" onClick={() => setMonth(new Date(Date.UTC(year, monthIndex + 1, 1, 12)))}>Next →</Button></div></section>}
+        <section className="card"><header className="card-head"><h2>By project</h2></header>{projectBars.length ? <div className="bar-list">{projectBars.map((bar) => <div className="bar-row" key={bar.id}><span className="bar-name">{bar.name}</span><div className="bar-track"><span style={{ width: `${bar.pct}%` }} /></div><small>{bar.label}</small></div>)}</div> : <p className="replay-empty">No project time logged this month.</p>}</section>
+      </aside>
+      <div className="archive-main">
+        <section className="card replay-head">
+          <div><h2>{selectedDate ? formatDateLabel(selectedDate, "Asia/Kolkata") : "Pick a day"}</h2><small>5:30 PM → 3:30 AM IST{selectedShift ? "" : " · no shift saved"}</small></div>
+          {selectedDate ? <div className="replay-chips"><Button size="sm" variant="outline" onClick={copyStandup}>Copy standup</Button><Button size="sm" variant="outline" onClick={() => downloadText(`nightshift-${activeDay}.json`, JSON.stringify({ shift: selectedShift ?? null, tasks: visibleDatedTasks, meetings: visibleDatedMeetings }, null, 2), "application/json")}><Download size={13} /> Day</Button><span className={`pill${selectedShift?.ended_at ? " ok" : ""}`}>{selectedShift?.ended_at ? "Wrapped up" : selectedShift ? "Open" : "No shift"}</span><span className="pill">{visibleDatedTasks.filter((task) => task.status === "done").length}/{visibleDatedTasks.length} tasks</span><span className="pill">{relativeDuration(visibleDatedTasks.reduce((sum, task) => sum + task.elapsed_seconds, 0))} logged</span></div> : null}
+        </section>
+        {selectedDate ? <div className="replay-grid">
+          <section className="card"><header className="card-head"><h2><ListChecks size={14} /> Tasks <span className="count-badge">{visibleDatedTasks.length}</span></h2></header>{visibleDatedTasks.length ? <div className="replay-list">{visibleDatedTasks.map((task) => <div className="replay-item" key={task.id}><span className={`replay-check${task.status === "done" ? " done" : ""}`}>{task.status === "done" ? <Check size={11} /> : null}</span><div className="replay-body"><strong>{task.title}</strong><small>{data.projects.find((project) => project.id === task.project_id)?.name ?? "No project"} · {task.steps.filter((step) => step.completed).length}/{task.steps.length} steps{task.rollover ? " · rolled over" : ""}</small></div><span className={`priority-chip p-${task.priority}`}>{task.priority === "high" ? "HIGH" : task.priority === "low" ? "LOW" : "MED"}</span><span className="replay-time">{relativeDuration(task.elapsed_seconds)}</span></div>)}</div> : <p className="replay-empty">No tasks saved for this shift.</p>}</section>
+          <section className="card"><header className="card-head"><h2><CalendarDays size={14} /> Meetings <span className="count-badge">{visibleDatedMeetings.length}</span></h2></header>{visibleDatedMeetings.length ? <div className="replay-list">{visibleDatedMeetings.map((meeting) => <div className="replay-item stack" key={meeting.id}><div className="replay-body"><strong>{meeting.title}</strong><small>{formatClock(new Date(meeting.starts_at), clientTz)} {zoneAbbr(new Date(meeting.starts_at), clientTz)} · {formatClock(new Date(meeting.starts_at), "Asia/Kolkata")} IST · {meeting.client_name || "Client"}</small></div>{meeting.notes ? <p className="replay-note">{meeting.notes}</p> : null}{meeting.action_items.length ? <ul className="replay-actions">{meeting.action_items.map((item) => <li key={item}>{item}</li>)}</ul> : null}</div>)}</div> : <p className="replay-empty">No meetings saved.</p>}</section>
+          <section className="card"><header className="card-head"><h2><FileImage size={14} /> Evidence <span className="count-badge">{visibleDatedAttachments.length}</span></h2></header>{visibleDatedAttachments.length ? <div className="thumb-grid wide">{visibleDatedAttachments.map((attachment) => <button className="thumb" key={attachment.id} onClick={() => onAttachment(attachment.id)} title={attachment.file_name}>{attachment.previewUrl ? <img src={attachment.previewUrl} alt={attachment.file_name} /> : <FileImage size={18} />}</button>)}</div> : <p className="replay-empty">No evidence saved.</p>}</section>
+          <section className="card"><header className="card-head"><h2><Clipboard size={14} /> Handover note</h2></header>{selectedShift?.wrap_up ? <p className="replay-note">{selectedShift.wrap_up}</p> : <p className="replay-empty">No handover note.</p>}{selectedShift?.focus_notes ? <><div className="replay-sub">Scratchpad</div><p className="replay-note">{selectedShift.focus_notes}</p></> : null}</section>
+        </div> : <section className="card"><p className="replay-empty">Select a date on the calendar to replay that shift.</p></section>}
+      </div>
     </div>}
   </div>;
 }
 
-function ModalShell({ title, description, onClose, children, className = "" }: { title: string; description: string; onClose: () => void; children: ReactNode; className?: string }) {
-  useEffect(() => { const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); }; window.addEventListener("keydown", onKey); return () => window.removeEventListener("keydown", onKey); }, [onClose]);
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className={`modal-panel ${className}`} role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><div className="eyebrow">NIGHTSHIFT · PRIVATE WORKSPACE</div><h2 id="modal-title">{title}</h2><p>{description}</p></div><Button variant="ghost" size="icon" aria-label="Close" onClick={onClose}><X size={17} /></Button></div>{children}</section></div>;
+function PasteNotesDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (items: string[]) => Promise<void> }) {
+  const [text, setText] = useState("");
+  const items = extractActionItems(text);
+  return <ModalShell title="Paste notes or email" description="" onClose={onClose}>
+    <div className="modal-form">
+      <Textarea autoFocus value={text} onChange={(event) => setText(event.target.value)} placeholder={"Paste text. Bullets, numbered lines and “Action:” lines become tasks."} />
+      {items.length ? <ul className="extract-list">{items.map((item) => <li key={item}><Check size={13} /> {item}</li>)}</ul> : <p className="field-helper">No action items found yet.</p>}
+      <div className="modal-actions"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button disabled={!items.length} onClick={() => void onCreate(items).then(onClose)}>Add {items.length || ""} to tonight</Button></div>
+    </div>
+  </ModalShell>;
 }
 
 function ProjectModal({ userId, onClose, onSave }: { userId: string; onClose: () => void; onSave: (project: Omit<Project, "id" | "archived_at">) => Promise<void> }) {
@@ -613,27 +840,26 @@ function MeetingModal({ userId, shiftId, projects, onClose, onSave }: { userId: 
   return <ModalShell title="Add a meeting" description="Add it in IST; it will also show its local time in New York." onClose={onClose}><form className="modal-form" onSubmit={save}><label className="field-label" htmlFor="meeting-title">Meeting</label><Input id="meeting-title" autoFocus required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="e.g. Weekly project review" /><label className="field-label" htmlFor="meeting-client">Client</label><Input id="meeting-client" value={client} onChange={(event) => setClient(event.target.value)} placeholder="Client or company" /><label className="field-label" htmlFor="meeting-project">Project</label><select id="meeting-project" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">No project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><div className="form-split"><label className="field-label" htmlFor="meeting-start">Starts · IST<input id="meeting-start" type="datetime-local" required value={starts} onChange={(event) => setStarts(event.target.value)} /></label><label className="field-label" htmlFor="meeting-end">Ends · IST<input id="meeting-end" type="datetime-local" value={ends} onChange={(event) => setEnds(event.target.value)} /></label></div><label className="field-label" htmlFor="meeting-agenda">Agenda</label><Textarea id="meeting-agenda" value={agenda} onChange={(event) => setAgenda(event.target.value)} placeholder="Topics to cover" /><label className="field-label" htmlFor="meeting-dossier">Pre-meeting dossier</label><Textarea id="meeting-dossier" value={dossier} onChange={(event) => setDossier(event.target.value)} placeholder="Client context, recent work, or questions" /><div className="modal-actions"><Button type="button" variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving || !title.trim() || !starts}>{saving ? <LoaderCircle size={15} className="spin" /> : <CalendarDays size={15} />} Save meeting</Button></div></form></ModalShell>;
 }
 
-function TaskModal({ userId, shiftId, projects, templates, defaultBucket, onClose, onSave }: { userId: string; shiftId: string | null; projects: Project[]; templates: WorkflowTemplate[]; defaultBucket: PlanBucket; onClose: () => void; onSave: (task: { title: string; description: string; project_id: string | null; planning_bucket: PlanBucket; planned_date: string | null; priority: TaskPriority; steps: string[]; shift_id: string | null }) => Promise<void> }) {
-  const [title, setTitle] = useState(""); const [description, setDescription] = useState(""); const [projectId, setProjectId] = useState(""); const [bucket, setBucket] = useState(defaultBucket); const [priority, setPriority] = useState<TaskPriority>("normal"); const [steps, setSteps] = useState(""); const [templateId, setTemplateId] = useState(""); const [saving, setSaving] = useState(false);
-  function useWorkflow(id: string) { setTemplateId(id); const template = templates.find((item) => item.id === id); if (template) { setTitle(template.name); setProjectId(template.project_id ?? ""); setSteps(template.steps.join("\n")); } }
-  const save = async (event: FormEvent) => { event.preventDefault(); if (!title.trim()) return; setSaving(true); const plannedDate = bucket === "tonight" ? getShiftDateKey(new Date()) : bucket === "tomorrow" ? getShiftDateKeyFromStart(getNextShiftDate(new Date())) : null; try { await onSave({ title: title.trim(), description: description.trim(), project_id: projectId || null, planning_bucket: bucket, planned_date: plannedDate, priority, steps: steps.split("\n").map((step) => step.trim()).filter(Boolean), shift_id: bucket === "tonight" ? shiftId : null }); } finally { setSaving(false); } };
-  return <ModalShell title="Add to tonight" description="Add a focused task and the checklist steps that move it forward." onClose={onClose}><form className="modal-form" onSubmit={save}><label className="field-label" htmlFor="task-title">Task</label><Input id="task-title" autoFocus required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="What needs to get done?" /><label className="field-label" htmlFor="task-notes">Notes</label><Textarea id="task-notes" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Context, handoff, or definition of done" /><div className="form-split"><label className="field-label" htmlFor="task-project">Project<select id="task-project" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Personal / no project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="field-label" htmlFor="task-bucket">Plan<select id="task-bucket" value={bucket} onChange={(event) => setBucket(event.target.value as PlanBucket)}>{BUCKET_OPTIONS.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label></div><div className="form-split"><label className="field-label" htmlFor="task-priority">Priority<select id="task-priority" value={priority} onChange={(event) => setPriority(event.target.value as TaskPriority)}><option value="normal">Normal</option><option value="high">High</option><option value="low">Low</option></select></label>{templates.length ? <label className="field-label" htmlFor="task-template">Use workflow<select id="task-template" value={templateId} onChange={(event) => useWorkflow(event.target.value)}><option value="">Start fresh</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></label> : <span />}</div><label className="field-label" htmlFor="task-steps">Checklist <small>One step per line</small></label><Textarea id="task-steps" value={steps} onChange={(event) => setSteps(event.target.value)} placeholder="Gather references\nDraft the update\nSend for review" /><div className="modal-actions"><Button type="button" variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving || !title.trim()}>{saving ? <LoaderCircle size={15} className="spin" /> : <Plus size={15} />} Add task</Button></div></form></ModalShell>;
+function TaskModal({ userId, shiftId, projects, templates, defaultBucket, defaultProjectId, onClose, onSave }: { userId: string; shiftId: string | null; defaultProjectId: string; projects: Project[]; templates: WorkflowTemplate[]; defaultBucket: PlanBucket; onClose: () => void; onSave: (task: { title: string; description: string; project_id: string | null; planning_bucket: PlanBucket; planned_date: string | null; priority: TaskPriority; steps: string[]; shift_id: string | null }) => Promise<void> }) {
+  const [title, setTitle] = useState(""); const [description, setDescription] = useState(""); const [projectId, setProjectId] = useState(defaultProjectId); const [bucket, setBucket] = useState(defaultBucket); const [priority, setPriority] = useState<TaskPriority>("normal"); const [steps, setSteps] = useState(""); const [templateId, setTemplateId] = useState(""); const [saving, setSaving] = useState(false);
+  function useWorkflow(id: string) { setTemplateId(id); const template = templates.find((item) => item.id === id); if (template) { setTitle(template.name); setProjectId(template.project_id ?? defaultProjectId); setSteps(template.steps.join("\n")); } }
+  const save = async (event: FormEvent) => { event.preventDefault(); if (!title.trim() || !projectId) return; setSaving(true); const plannedDate = bucket === "tonight" ? getShiftDateKey(new Date()) : bucket === "tomorrow" ? getShiftDateKeyFromStart(getNextShiftDate(new Date())) : null; try { await onSave({ title: title.trim(), description: description.trim(), project_id: projectId || null, planning_bucket: bucket, planned_date: plannedDate, priority, steps: steps.split("\n").map((step) => step.trim()).filter(Boolean), shift_id: bucket === "tonight" ? shiftId : null }); } finally { setSaving(false); } };
+  return <ModalShell title="New task" description="" onClose={onClose}><form className="modal-form" onSubmit={save}><label className="field-label" htmlFor="task-title">Task</label><Input id="task-title" autoFocus required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="What needs to get done?" /><label className="field-label" htmlFor="task-notes">Notes</label><Textarea id="task-notes" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Context, handoff, or definition of done" /><div className="form-split"><label className="field-label" htmlFor="task-project">Project<select id="task-project" required value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="" disabled>Select a project *</option>{projects.filter((project) => !project.archived_at).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="field-label" htmlFor="task-bucket">Plan<select id="task-bucket" value={bucket} onChange={(event) => setBucket(event.target.value as PlanBucket)}>{BUCKET_OPTIONS.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label></div><div className="form-split"><label className="field-label" htmlFor="task-priority">Priority<select id="task-priority" value={priority} onChange={(event) => setPriority(event.target.value as TaskPriority)}><option value="high">High</option><option value="normal">Medium</option><option value="low">Low</option></select></label>{templates.length ? <label className="field-label" htmlFor="task-template">Use workflow<select id="task-template" value={templateId} onChange={(event) => useWorkflow(event.target.value)}><option value="">Start fresh</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></label> : <span />}</div><label className="field-label" htmlFor="task-steps">Checklist <small>One step per line</small></label><Textarea id="task-steps" value={steps} onChange={(event) => setSteps(event.target.value)} placeholder={"Gather references\nDraft the update\nSend for review"} /><div className="modal-actions"><Button type="button" variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving || !title.trim()}>{saving ? <LoaderCircle size={15} className="spin" /> : <Plus size={15} />} Add task</Button></div></form></ModalShell>;
 }
 
-function WrapModal({ shift, tasks, seconds, onClose, onSave, onCopy, busy }: { shift: Shift | null; tasks: Task[]; seconds: number; onClose: () => void; onSave: (text: string) => Promise<void>; onCopy: (target: "Slack" | "Teams") => void; busy: boolean }) {
+function WrapModal({ shift, tasks, onClose, onSave, onCopy, busy }: { shift: Shift | null; tasks: Task[]; onClose: () => void; onSave: (text: string) => Promise<void>; onCopy: (target: "Slack" | "Teams" | "Email" | "Client") => void; busy: boolean }) {
   const [note, setNote] = useState(shift?.wrap_up ?? "");
   const completed = tasks.filter((task) => task.planning_bucket === "tonight" && task.status === "done");
   const pending = tasks.filter((task) => task.planning_bucket === "tonight" && task.status !== "done");
   const save = (event: FormEvent) => { event.preventDefault(); void onSave(note); };
-  return <ModalShell title="Close the loop." description={`Your shift recap closes in ${relativeDuration(seconds)}. You can save early or leave this note for later.`} onClose={onClose} className="wrap-modal"><div className="wrap-countdown"><Timer size={16} /><span>60-SECOND WRAP-UP</span><strong>{String(Math.floor(seconds / 60)).padStart(2, "0")}:{String(seconds % 60).padStart(2, "0")}</strong></div><div className="wrap-tally"><div><CheckCircle2 size={16} /><strong>{completed.length} completed</strong></div><div><ArrowDownToLine size={16} /><strong>{pending.length} rolling over</strong></div></div><div className="wrap-task-summary"><div className="eyebrow">NEXT SHIFT</div>{pending.length ? pending.map((task) => <div key={task.id}><span className="replay-check" />{task.title}</div>) : <p>Your queue is clear for the next shift.</p>}</div><form className="modal-form" onSubmit={save}><label className="field-label" htmlFor="wrap-note">What should you remember?</label><Textarea id="wrap-note" autoFocus value={note} onChange={(event) => setNote(event.target.value)} placeholder="Handoff notes, blockers, or tomorrow's first move" /><div className="wrap-share"><span className="eyebrow">COPY A HANDOFF</span><div><Button type="button" variant="outline" size="sm" onClick={() => onCopy("Slack")}><Copy size={14} /> Slack</Button><Button type="button" variant="outline" size="sm" onClick={() => onCopy("Teams")}><Copy size={14} /> Teams</Button></div></div><div className="modal-actions"><Button type="button" variant="ghost" onClick={onClose}>Keep working</Button><Button type="submit" disabled={busy}>Save wrap-up</Button></div></form></ModalShell>;
+  return <ModalShell title="Wrap up" description="" onClose={onClose} className="wrap-modal"><div className="wrap-tally"><div><CheckCircle2 size={16} /><strong>{completed.length} completed</strong></div><div><ArrowDownToLine size={16} /><strong>{pending.length} rolling over</strong></div></div><div className="wrap-task-summary">{pending.length ? pending.map((task) => <div key={task.id}><span className="replay-check" />{task.title}</div>) : <p>Your queue is clear for the next shift.</p>}</div><form className="modal-form" onSubmit={save}><label className="field-label" htmlFor="wrap-note">What should you remember?</label><Textarea id="wrap-note" autoFocus value={note} onChange={(event) => setNote(event.target.value)} placeholder="Handoff notes, blockers, or tomorrow's first move" /><div className="wrap-share"><span className="eyebrow">COPY A HANDOFF</span><div><Button type="button" variant="outline" size="sm" onClick={() => onCopy("Slack")}><Copy size={14} /> Slack</Button><Button type="button" variant="outline" size="sm" onClick={() => onCopy("Teams")}><Copy size={14} /> Teams</Button><Button type="button" variant="outline" size="sm" onClick={() => onCopy("Email")}><Copy size={14} /> Email</Button><Button type="button" variant="outline" size="sm" onClick={() => onCopy("Client")}><Copy size={14} /> Client</Button></div></div><div className="modal-actions"><Button type="button" variant="ghost" onClick={onClose}>Keep working</Button><Button type="submit" disabled={busy}>Save wrap-up</Button></div></form></ModalShell>;
 }
 
 function EvidenceDialog({ file, busy, onClose, onSave }: { file: File; busy: boolean; onClose: () => void; onSave: (file: File) => void }) {
-  const [preview, setPreview] = useState(""); const [name, setName] = useState(file.name || "pasted-evidence.png"); const [redact, setRedact] = useState(false); const canvasRef = useRef<HTMLCanvasElement>(null); const imageRef = useRef<HTMLImageElement>(null); const objectUrl = useMemo(() => file.size ? URL.createObjectURL(file) : "", [file]);
-  useEffect(() => () => { if (objectUrl) URL.revokeObjectURL(objectUrl); }, [objectUrl]);
-  useEffect(() => { if (objectUrl) setPreview(objectUrl); }, [objectUrl]);
-  function onMark(event: React.MouseEvent<HTMLCanvasElement>) { const canvas = canvasRef.current; const image = imageRef.current; if (!canvas || !image) return; const rect = canvas.getBoundingClientRect(); const ctx = canvas.getContext("2d"); if (!ctx) return; canvas.width = image.naturalWidth; canvas.height = image.naturalHeight; ctx.drawImage(image, 0, 0); const scaleX = image.naturalWidth / rect.width; const scaleY = image.naturalHeight / rect.height; const x = Math.max(0, (event.clientX - rect.left) * scaleX); const y = Math.max(0, (event.clientY - rect.top) * scaleY); ctx.fillStyle = redact ? "#161c1c" : "#c7efdf"; ctx.strokeStyle = "#161c1c"; ctx.lineWidth = Math.max(4, image.naturalWidth / 180); ctx.fillRect(x - ctx.lineWidth * 4, y - ctx.lineWidth * 2, ctx.lineWidth * 8, ctx.lineWidth * 4); ctx.strokeRect(x - ctx.lineWidth * 4, y - ctx.lineWidth * 2, ctx.lineWidth * 8, ctx.lineWidth * 4); canvas.toBlob((blob) => { if (blob) setPreview(URL.createObjectURL(blob)); }, "image/png"); }
-  async function save() { const finalFile = canvasRef.current?.toBlob ? await new Promise<File>((resolve) => canvasRef.current?.toBlob((blob) => resolve(new File([blob ?? file], name, { type: "image/png" })), "image/png")) : file; onSave(finalFile); }
+  const [preview, setPreview] = useState(""); const [name, setName] = useState(file.name || "pasted-evidence.png"); const [redact, setRedact] = useState(false); const canvasRef = useRef<HTMLCanvasElement>(null); const imageRef = useRef<HTMLImageElement>(null); const [marked, setMarked] = useState(false);
+  useEffect(() => { if (!file.size) { setPreview(""); return; } const url = URL.createObjectURL(file); setPreview(url); return () => URL.revokeObjectURL(url); }, [file]);
+  function onMark(event: React.MouseEvent<HTMLCanvasElement>) { const canvas = canvasRef.current; const image = imageRef.current; if (!canvas || !image) return; const rect = image.getBoundingClientRect(); const ctx = canvas.getContext("2d"); if (!ctx) return; canvas.width = image.naturalWidth; canvas.height = image.naturalHeight; ctx.drawImage(image, 0, 0); setMarked(true); const scaleX = image.naturalWidth / rect.width; const scaleY = image.naturalHeight / rect.height; const x = Math.max(0, (event.clientX - rect.left) * scaleX); const y = Math.max(0, (event.clientY - rect.top) * scaleY); ctx.fillStyle = redact ? "#161c1c" : "#c7efdf"; ctx.strokeStyle = "#161c1c"; ctx.lineWidth = Math.max(4, image.naturalWidth / 180); ctx.fillRect(x - ctx.lineWidth * 4, y - ctx.lineWidth * 2, ctx.lineWidth * 8, ctx.lineWidth * 4); ctx.strokeRect(x - ctx.lineWidth * 4, y - ctx.lineWidth * 2, ctx.lineWidth * 8, ctx.lineWidth * 4); canvas.toBlob((blob) => { if (blob) setPreview(URL.createObjectURL(blob)); }, "image/png"); }
+  async function save() { const finalFile = marked && canvasRef.current?.toBlob ? await new Promise<File>((resolve) => canvasRef.current?.toBlob((blob) => resolve(new File([blob ?? file], name, { type: "image/png" })), "image/png")) : file; onSave(finalFile); }
   return <ModalShell title="Save shift evidence" description="Mark a screenshot or cover a detail before saving it to private storage." onClose={onClose} className="evidence-modal"><div className="evidence-tools"><Button variant={redact ? "secondary" : "outline"} size="sm" onClick={() => setRedact(!redact)}><span className={`redact-swatch${redact ? " redact-active" : ""}`} />{redact ? "Redact marks" : "Highlight marks"}</Button><span>Click the image to mark a spot</span></div><div className="evidence-preview">{preview ? <><img ref={imageRef} src={preview} alt="Screenshot to save" onClick={onMark} /><canvas ref={canvasRef} hidden /></> : <div className="evidence-empty"><ImagePlus size={22} />Choose a screenshot from this device to save it.</div>}</div><label className="field-label" htmlFor="evidence-name">File name</label><Input id="evidence-name" value={name} onChange={(event) => setName(event.target.value)} /><div className="modal-actions"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button onClick={() => void save()} disabled={busy || !file.size || !name.trim()}><Upload size={15} /> Save privately</Button></div></ModalShell>;
 }
 

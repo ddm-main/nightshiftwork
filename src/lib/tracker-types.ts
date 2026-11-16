@@ -79,6 +79,7 @@ export type Attachment = {
   object_path: string;
   file_name: string;
   content_type: string;
+  created_at?: string;
   note: string;
   ocr_text: string;
   previewUrl?: string;
