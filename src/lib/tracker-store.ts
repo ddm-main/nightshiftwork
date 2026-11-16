@@ -114,11 +114,11 @@ export async function addTaskStep(userId: string, taskId: string, title: string,
   return { id: data.id, title: data.title, completed: data.completed, position: data.position };
 }
 
-export async function createMeeting(userId: string, meeting: Omit<Meeting, "id" | "source">): Promise<Meeting> {
+export async function createMeeting(userId: string, meeting: Omit<Meeting, "id" | "source">, source: Meeting["source"] = "manual"): Promise<Meeting> {
   const { data, error } = await supabase.from("meetings")
-    .insert({ ...meeting, user_id: userId, source: "manual" }).select("*").single();
+    .insert({ ...meeting, user_id: userId, source }).select("*").single();
   if (error) throw new Error(error.message);
-  return { ...data, source: "manual" };
+  return { ...data, source };
 }
 
 export async function saveMeeting(userId: string, meetingId: string, changes: Partial<Meeting>): Promise<void> {

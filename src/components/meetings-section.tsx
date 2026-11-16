@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from "react";
-import { CalendarDays, Download, ListChecks, Plus, Search, Trash2, WandSparkles } from "lucide-react";
+import { CalendarDays, Download, ListChecks, Mail, Plus, Search, Trash2, WandSparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -20,8 +20,8 @@ function countdown(start: Date, end: Date | null, now: Date) {
   return { text: `In ${Math.floor(mins / 1440)}d`, tone: "later" };
 }
 
-export function MeetingsSection({ meetings, projects, now, tz, onOpen, onAdd, onImport, onTasks }: {
-  meetings: Meeting[]; projects: Project[]; now: Date; tz: string;
+export function MeetingsSection({ meetings, projects, now, tz, onOpen, onAdd, onImport, onTasks, outlookConnected, outlookSyncing, onOutlook }: {
+  meetings: Meeting[]; projects: Project[]; now: Date; tz: string; outlookConnected: boolean; outlookSyncing: boolean; onOutlook: () => void;
   onOpen: (meeting: Meeting) => void; onAdd: () => void; onImport: (file: File) => void; onTasks: (meeting: Meeting) => void;
 }) {
   const [tab, setTab] = useState<"upcoming" | "past" | "all">("upcoming");
@@ -52,6 +52,7 @@ export function MeetingsSection({ meetings, projects, now, tz, onOpen, onAdd, on
     <div className="page-head">
       <div className="page-title"><h1>Meetings</h1><span className="chip">{upcoming.length} upcoming</span></div>
       <div className="page-actions">
+        <Button variant="outline" size="sm" onClick={onOutlook} disabled={outlookSyncing}><Mail size={14} /> {outlookConnected ? (outlookSyncing ? "Syncing…" : "Sync Outlook") : "Connect Outlook"}</Button>
         <label className="icon-btn wide" title="Import a .ics calendar file"><Download size={14} /> Import .ics<input type="file" accept=".ics,text/calendar" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) onImport(file); event.target.value = ""; }} /></label>
         <Button className="primary-action" size="sm" onClick={onAdd}><Plus size={14} /> Meeting</Button>
       </div>
