@@ -1,0 +1,1 @@
+CREATE POLICY "Users manage their own tracker storage objects" ON storage.objects FOR ALL TO authenticated USING (bucket_id IN ('task-evidence', 'meeting-assets', 'shift-reports') AND (storage.foldername(name))[1] = auth.uid()::text) WITH CHECK (bucket_id IN ('task-evidence', 'meeting-assets', 'shift-reports') AND (storage.foldername(name))[1] = auth.uid()::text);
