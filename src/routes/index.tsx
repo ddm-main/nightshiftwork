@@ -29,7 +29,10 @@ import { runningSeconds, totalSeconds } from "@/lib/timers";
 import { BUCKET_COPY, BUCKET_OPTIONS, ModalShell, PriorityChip, relativeDuration, shortDuration, timeLeftUntil, zoneAbbr } from "@/components/ui-kit";
 import { auditToJson, downloadText, tasksToCsv } from "@/lib/export";
 import { extractActionItems } from "@/lib/actions";
+import { parseEml } from "@/lib/eml";
 import { parseIcs } from "@/lib/ics";
+import { knownOrigins } from "@/lib/origins";
+import { validateCalendarUrl } from "@/lib/calendar-url";
 import { parseQuickTask } from "@/lib/quick-add";
 import {
   formatClock, formatDateLabel, getNextShiftDate, getShiftDateKey, getShiftDateKeyFromCivilDate,
@@ -157,6 +160,16 @@ function NightShiftApp() {
   const [msLastSync, setMsLastSync] = useState<Date | null>(null);
   const [proposals, setProposals] = useState<EmailProposal[]>([]);
   const [dismissed, setDismissed] = useState<string[]>([]);
+  const [icsUrl, setIcsUrlState] = useState("");
+  const [icsSaved, setIcsSaved] = useState("");
+  const [emlProposals, setEmlProposals] = useState<EmailProposal[]>([]);
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("ns-ics-url") ?? "";
+      setIcsUrlState(saved); setIcsSaved(saved);
+      setEmlProposals(JSON.parse(localStorage.getItem("ns-eml-mail") ?? "[]") as EmailProposal[]);
+    } catch { /* ignore */ }
+  }, []);
   useEffect(() => {
     const id = getMsClientId();
     setMsClientState(id);
@@ -261,7 +274,8 @@ function NightShiftApp() {
   if (noProjectCount) notices.push({ id: "noproject", tone: "warn", text: `${noProjectCount} open task${noProjectCount === 1 ? "" : "s"} have no project`, go: () => setActiveSection("planner") });
   if (gapChange) notices.push({ id: "dst", tone: "info", text: `US time change in ${gapChange.inDays} days: gap ${gapChange.from}→${gapChange.to}h` });
   if (!projects.some((project) => !project.archived_at)) notices.push({ id: "firstproject", tone: "info", text: "Create your first client project", go: () => setActiveSection("projects") });
-  const visibleProposals = proposals.filter((proposal) => !dismissed.includes(proposal.id));
+  const visibleProposals = [...proposals, ...emlProposals.filter((mail) => !proposals.some((item) => item.id === mail.id))].filter((proposal) => !dismissed.includes(proposal.id));
+  const outlookLinked = msConnected || Boolean(icsSaved);
   if (visibleProposals.length) notices.push({ id: "inbox", tone: "info", text: `${visibleProposals.length} email suggestion${visibleProposals.length === 1 ? "" : "s"} from Outlook`, go: () => setActiveSection("shift") });
   const unreadNotices = notices.filter((notice) => readNotices[notice.id] !== notice.text);
   const selectedAttachmentValue = data.attachments.find((attachment) => attachment.id === selectedAttachment) ?? null;
@@ -385,30 +399,58 @@ function NightShiftApp() {
     }, "Shift wrapped up");
   }
 
-  async function syncOutlook(silent = false) {
-    if (!user || !msConnected || msSyncing) return;
+  async function syncOutlook(silent = false, linkOverride?: string) {
+    const link = linkOverride ?? icsSaved;
+    if (!user || (!msConnected && !link) || msSyncing) return;
     setMsSyncing(true);
     try {
-      const events = (await fetchCalendar(msClient, new Date(now.getTime() - 86_400_000), new Date(now.getTime() + 14 * 86_400_000))).map(eventToMeeting);
+      const from = new Date(now.getTime() - 86_400_000);
+      const to = new Date(now.getTime() + 14 * 86_400_000);
+      const events: Array<{ title: string; startsAt: string; endsAt: string | null; description: string; organizerEmail: string }> = [];
+      const problems: string[] = [];
+      if (link) {
+        try {
+          const response = await fetch(`/api/calendar?url=${encodeURIComponent(link)}`);
+          if (!response.ok) throw new Error(await response.text());
+          events.push(...parseIcs(await response.text(), { from, to }));
+        } catch (error) { problems.push(error instanceof Error ? error.message : "Calendar link failed."); }
+      }
+      if (msConnected) {
+        try { events.push(...(await fetchCalendar(msClient, from, to)).map(eventToMeeting).map((event) => ({ title: event.title, startsAt: event.startsAt, endsAt: event.endsAt, description: event.description, organizerEmail: event.organizerEmail }))); }
+        catch (error) { setMsConnected(isMsConnected()); problems.push(error instanceof Error ? error.message : "Outlook sync failed."); }
+      }
       const known = new Set(data.meetings.map((meeting) => `${meeting.title}|${new Date(meeting.starts_at).toISOString()}`));
-      const fresh = events.filter((event) => !known.has(`${event.title}|${event.startsAt}`));
+      const fresh = events.filter((event, index) => { const key = `${event.title}|${event.startsAt}`; if (known.has(key)) return false; known.add(key); return events.findIndex((other) => `${other.title}|${other.startsAt}` === key) === index; });
       for (const event of fresh) {
         const owner = data.projects.find((project) => !project.archived_at && domainMatches(event.organizerEmail, project.domain_rules));
         await createMeeting(user.id, { shift_id: null, project_id: owner?.id ?? null, title: event.title, client_name: owner?.client_name ?? "", starts_at: event.startsAt, ends_at: event.endsAt, agenda: "", dossier: event.description, notes: "", action_items: [] }, "outlook");
       }
-      const since = new Date(`${new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(now)}T08:00:00+05:30`);
-      const found = triageEmails(await fetchInbox(msClient, since), data.projects);
-      setProposals(found);
+      if (msConnected) {
+        try {
+          const since = new Date(`${new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(now)}T08:00:00+05:30`);
+          setProposals(triageEmails(await fetchInbox(msClient, since), data.projects));
+        } catch (error) { problems.push(error instanceof Error ? error.message : "Inbox sync failed."); }
+      }
       if (fresh.length) await refresh();
       setMsLastSync(new Date());
-      if (!silent) toast.success(`Outlook synced · ${fresh.length} new meeting${fresh.length === 1 ? "" : "s"} · ${found.length} email suggestion${found.length === 1 ? "" : "s"}`);
-    } catch (error) {
-      setMsConnected(isMsConnected());
-      if (!silent) toast.error(error instanceof Error ? error.message : "Outlook sync failed.");
+      if (!silent) {
+        if (problems.length) toast.error(problems[0]);
+        else toast.success(`Outlook synced · ${fresh.length} new meeting${fresh.length === 1 ? "" : "s"}`);
+      }
     } finally { setMsSyncing(false); }
   }
   const syncRef = useRef(syncOutlook);
   syncRef.current = syncOutlook;
+
+  async function importEml(files: File[]) {
+    const parsed = (await Promise.all(files.map(async (file, index) => parseEml(await file.text(), `${file.name}-${file.size}-${index}`)))).filter((message): message is NonNullable<typeof message> => Boolean(message));
+    if (!parsed.length) { toast.error("None of those files looked like saved emails (.eml)."); return; }
+    const found = triageEmails(parsed, data.projects);
+    const merged = [...found, ...emlProposals.filter((old) => !found.some((item) => item.id === old.id))].slice(0, 60);
+    setEmlProposals(merged);
+    try { localStorage.setItem("ns-eml-mail", JSON.stringify(merged)); } catch { /* ignore */ }
+    toast.success(`${parsed.length} email${parsed.length === 1 ? "" : "s"} read · ${found.length} suggestion${found.length === 1 ? "" : "s"}${parsed.length - found.length ? ` · ${parsed.length - found.length} skipped as not actionable` : ""}`);
+  }
 
   function dismissProposal(id: string) {
     setDismissed((current) => { const next = [...current, id]; try { localStorage.setItem("ns-dismissed-mail", JSON.stringify(next.slice(-300))); } catch { /* ignore */ } return next; });
@@ -525,11 +567,11 @@ function NightShiftApp() {
   });
 
   useEffect(() => {
-    if (!user || !msConnected || !shift) return;
+    if (!user || (!msConnected && !icsSaved) || !shift) return;
     void syncRef.current(true);
     const timer = window.setInterval(() => void syncRef.current(true), 15 * 60_000);
     return () => window.clearInterval(timer);
-  }, [user?.id, msConnected, Boolean(shift)]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [user?.id, msConnected, icsSaved, Boolean(shift)]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const autoPausing = useRef(false);
   useEffect(() => {
@@ -603,8 +645,8 @@ function NightShiftApp() {
       </header>
       <section className="app-content">
         {loadError ? <div className="error-banner" role="alert"><span>{loadError}</span><Button variant="outline" size="sm" onClick={() => { setLoadError(""); void refresh(); }}>Retry</Button></div> : null}
-        {activeSection === "shift" ? <ShiftSection {...{ outlook: { connected: msConnected, syncing: msSyncing, proposals: visibleProposals, onOpen: () => setOutlookOpen(true), onSync: () => void syncRef.current(false), onAccept: (proposal: EmailProposal, bucket: PlanBucket) => void acceptProposal(proposal, bucket), onDismiss: dismissProposal }, onEditTask: (task: Task) => setEditingTaskId(task.id), headActions, onTile: (kind: "projects" | "archive" | "meeting") => { if (kind === "meeting") { const next = upcomingMeetings.filter((meeting) => new Date(meeting.starts_at) > now).sort((a, b) => a.starts_at.localeCompare(b.starts_at))[0]; if (next) setMeetingDetailId(next.id); else setActiveSection("meetings"); } else setActiveSection(kind); }, now, shift, shiftState, shiftStart, shiftEnd, progress, nextShift, projects, tasks, tonightTasks, completedTonight, upcomingMeetings, activeMeeting, attachments: data.attachments, clientTz, onQuickAdd: (text: string, projectId: string, priority: TaskPriority) => void quickAddTask(text, projectId, priority), activeClientId: clientProject?.id ?? "", onPull: (task: Task) => void pullTask(task), onOpenMeeting: (meeting: Meeting) => setMeetingDetailId(meeting.id), onImportIcs: (file: File) => void importIcs(file), onPasteNotes: () => setPasteOpen(true), onTaskTimer: toggleTaskTimer, onTaskComplete: handleTaskComplete, onStepChange: handleStepChange, onAddStep: handleAddStep, onAddTask: () => setModal("template"), onAddMeeting: () => setModal("meeting"), onWrap: () => setModal("wrap"), onPaste: (file, taskId) => void onEvidence(file, taskId), onAttachment: setSelectedAttachment, busy, onMeetingFile: saveMeetingFile, onNotes: (text: string) => { if (user && shift) void saveShift(user.id, shift.id, { focus_notes: text }).catch(() => toast.error("Scratchpad could not be saved")); } }} /> : null}
-        {activeSection === "meetings" ? <MeetingsSection meetings={data.meetings} projects={projects} now={now} tz={clientTz} onOpen={(meeting) => setMeetingDetailId(meeting.id)} onAdd={() => setModal("meeting")} onImport={(file) => void importIcs(file)} onTasks={(meeting) => void tasksFromItems(meeting.action_items, meeting.project_id)} outlookConnected={msConnected} outlookSyncing={msSyncing} onOutlook={() => { if (msConnected) void syncRef.current(false); else setOutlookOpen(true); }} /> : null}
+        {activeSection === "shift" ? <ShiftSection {...{ outlook: { connected: outlookLinked, onImportEml: (files: File[]) => void importEml(files), syncing: msSyncing, proposals: visibleProposals, onOpen: () => setOutlookOpen(true), onSync: () => void syncRef.current(false), onAccept: (proposal: EmailProposal, bucket: PlanBucket) => void acceptProposal(proposal, bucket), onDismiss: dismissProposal }, onEditTask: (task: Task) => setEditingTaskId(task.id), headActions, onTile: (kind: "projects" | "archive" | "meeting") => { if (kind === "meeting") { const next = upcomingMeetings.filter((meeting) => new Date(meeting.starts_at) > now).sort((a, b) => a.starts_at.localeCompare(b.starts_at))[0]; if (next) setMeetingDetailId(next.id); else setActiveSection("meetings"); } else setActiveSection(kind); }, now, shift, shiftState, shiftStart, shiftEnd, progress, nextShift, projects, tasks, tonightTasks, completedTonight, upcomingMeetings, activeMeeting, attachments: data.attachments, clientTz, onQuickAdd: (text: string, projectId: string, priority: TaskPriority) => void quickAddTask(text, projectId, priority), activeClientId: clientProject?.id ?? "", onPull: (task: Task) => void pullTask(task), onOpenMeeting: (meeting: Meeting) => setMeetingDetailId(meeting.id), onImportIcs: (file: File) => void importIcs(file), onPasteNotes: () => setPasteOpen(true), onTaskTimer: toggleTaskTimer, onTaskComplete: handleTaskComplete, onStepChange: handleStepChange, onAddStep: handleAddStep, onAddTask: () => setModal("template"), onAddMeeting: () => setModal("meeting"), onWrap: () => setModal("wrap"), onPaste: (file, taskId) => void onEvidence(file, taskId), onAttachment: setSelectedAttachment, busy, onMeetingFile: saveMeetingFile, onNotes: (text: string) => { if (user && shift) void saveShift(user.id, shift.id, { focus_notes: text }).catch(() => toast.error("Scratchpad could not be saved")); } }} /> : null}
+        {activeSection === "meetings" ? <MeetingsSection meetings={data.meetings} projects={projects} now={now} tz={clientTz} onOpen={(meeting) => setMeetingDetailId(meeting.id)} onAdd={() => setModal("meeting")} onImport={(file) => void importIcs(file)} onTasks={(meeting) => void tasksFromItems(meeting.action_items, meeting.project_id)} outlookConnected={outlookLinked} outlookSyncing={msSyncing} onOutlook={() => { if (outlookLinked) void syncRef.current(false); else setOutlookOpen(true); }} /> : null}
         {activeSection === "projects" ? <ProjectsSection userId={user.id} projects={data.projects} tasks={tasks} meetings={data.meetings} templates={data.templates} now={now} activeClientId={clientProject?.id ?? ""} busy={busy} onUseClient={(id) => { setClientId(id); toast.success("Active client updated"); }} onRun={runAction} onNewProject={() => setModal("project")} onEditTask={(task) => setEditingTaskId(task.id)} onOpenMeeting={(meeting) => setMeetingDetailId(meeting.id)} /> : null}
         {activeSection === "planner" ? <PlanBoard userId={user.id} projects={projects} tasks={tasks} templates={data.templates} now={now} activeClientId={clientProject?.id ?? ""} busy={busy} onRun={runAction} onEditTask={(task) => setEditingTaskId(task.id)} /> : null}
         {activeSection === "archive" ? <ArchiveSection {...{ clientTz, data, now, month: archiveMonth, setMonth: setArchiveMonth, day: archiveDay, setDay: setArchiveDay, search, setSearch, onAttachment: setSelectedAttachment }} /> : null}
@@ -616,7 +658,7 @@ function NightShiftApp() {
       {modal === "wrap" ? <WrapModal shift={shift} tasks={tasks} onClose={() => setModal(null)} onSave={updateWrapUp} onCopy={copyShiftMessage} busy={busy} /> : null}
       {meetingForDialog ? <MeetingDialog key={meetingForDialog.id} meeting={meetingForDialog} projects={projects} tz={clientTz} onClose={() => setMeetingDetailId(null)} onSave={(changes) => saveMeetingDetail(meetingForDialog.id, changes)} onDelete={() => deleteMeeting(meetingForDialog)} onCreateTasks={(items, projectId) => tasksFromItems(items, projectId)} /> : null}
       {editingTask ? <TaskEditDialog key={editingTask.id} task={editingTask} projects={projects} onClose={() => setEditingTaskId(null)} onSave={(changes) => editTask(editingTask, changes)} onDelete={() => deleteTask(editingTask)} /> : null}
-      {outlookOpen ? <OutlookDialog clientId={msClient} onClientId={(id) => { setMsClientState(id); setMsClientId(id); }} account={msAccount} connected={msConnected} redirectUri={`${window.location.origin}/`} syncing={msSyncing} lastSync={msLastSync} onConnect={() => void startLogin(msClient.trim(), `${window.location.origin}/`)} onDisconnect={() => { signOutMicrosoft(); setMsConnected(false); setMsAccount(null); setProposals([]); setMsLastSync(null); toast.success("Outlook disconnected"); }} onSync={() => void syncRef.current(false)} onClose={() => setOutlookOpen(false)} /> : null}
+      {outlookOpen ? <OutlookDialog icsUrl={icsUrl} onIcsUrl={setIcsUrlState} onSaveIcs={() => { const valid = validateCalendarUrl(icsUrl); if (!valid) return; const clean = valid.toString(); setIcsUrlState(clean); setIcsSaved(clean); try { localStorage.setItem("ns-ics-url", clean); } catch { /* ignore */ } void syncRef.current(false, clean); }} onRemoveIcs={() => { setIcsUrlState(""); setIcsSaved(""); try { localStorage.removeItem("ns-ics-url"); } catch { /* ignore */ } toast.success("Calendar link removed"); }} onImportEml={(files) => void importEml(files)} clientId={msClient} onClientId={(id) => { setMsClientState(id); setMsClientId(id); }} account={msAccount} connected={msConnected} redirectUris={knownOrigins(window.location.origin).map((origin) => `${origin}/`)} syncing={msSyncing} lastSync={msLastSync} onConnect={() => void startLogin(msClient.trim(), `${window.location.origin}/`)} onDisconnect={() => { signOutMicrosoft(); setMsConnected(false); setMsAccount(null); setProposals([]); setMsLastSync(null); toast.success("Outlook disconnected"); }} onSync={() => void syncRef.current(false)} onClose={() => setOutlookOpen(false)} /> : null}
       {prefsOpen ? <PreferencesDialog prefs={prefs} onChange={setPrefs} projects={projects} clientId={clientProject?.id ?? ""} onClient={setClientId} onClose={() => setPrefsOpen(false)} /> : null}
       {pasteOpen ? <PasteNotesDialog onClose={() => setPasteOpen(false)} onCreate={(items) => tasksFromItems(items, clientProject?.id ?? null)} /> : null}
       {evidenceInput ? <EvidenceDialog file={evidenceInput.file} busy={busy} onClose={() => setEvidenceInput(null)} onSave={(file) => void saveEvidence(file, evidenceInput.taskId)} /> : null}
@@ -682,7 +724,7 @@ function ShiftSection(props: {
   onPaste: (file: File, taskId: string | null) => void; onAttachment: (id: string) => void; busy: boolean; onNotes: (text: string) => void;
   onMeetingFile: (meeting: Meeting, file: File) => void; activeClientId: string; onQuickAdd: (text: string, projectId: string, priority: TaskPriority) => void; onPull: (task: Task) => void;
   onOpenMeeting: (meeting: Meeting) => void; onImportIcs: (file: File) => void; onPasteNotes: () => void;
-  outlook: { connected: boolean; syncing: boolean; proposals: EmailProposal[]; onOpen: () => void; onSync: () => void; onAccept: (proposal: EmailProposal, bucket: PlanBucket) => void; onDismiss: (id: string) => void };
+  outlook: { connected: boolean; onImportEml: (files: File[]) => void; syncing: boolean; proposals: EmailProposal[]; onOpen: () => void; onSync: () => void; onAccept: (proposal: EmailProposal, bucket: PlanBucket) => void; onDismiss: (id: string) => void };
   onEditTask: (task: Task) => void; headActions: React.ReactNode; onTile: (kind: "projects" | "archive" | "meeting") => void;
 }) {
   const { now, shift, shiftState, shiftEnd, progress, nextShift, projects, tasks, tonightTasks, completedTonight, upcomingMeetings, activeMeeting, attachments, clientTz, activeClientId, onTaskTimer, onTaskComplete, onStepChange, onAddStep, onAddTask, onAddMeeting, onWrap, onPaste, onAttachment, busy, onNotes, onMeetingFile, onQuickAdd, onPull, onOpenMeeting, onImportIcs, onPasteNotes, onEditTask, headActions, onTile, outlook } = props;
@@ -730,8 +772,8 @@ function ShiftSection(props: {
       </section>
       <div className="dash-col">
         <section className="card">
-          <header className="card-head"><h2><Mail size={14} /> {outlook.connected ? "Inbox" : "Outlook"}{outlook.connected ? <span className="count-badge">{outlook.proposals.length}</span> : null}</h2><div className="card-actions">{outlook.connected ? <Button variant="ghost" size="icon" aria-label="Sync Outlook" title="Sync now" onClick={outlook.onSync}><RefreshCw size={14} className={outlook.syncing ? "spin" : ""} /></Button> : null}<Button variant="ghost" size="sm" onClick={outlook.onOpen}>{outlook.connected ? "Manage" : "Connect"}</Button></div></header>
-          {!outlook.connected ? <div className="connect-card"><span>Sign in with Outlook to sync meetings and turn client email into task suggestions. Read-only access.</span></div> : outlook.proposals.length ? <div className="inbox-list">{outlook.proposals.slice(0, 5).map((proposal) => <div className="inbox-item" key={proposal.id}><strong>{proposal.subject}</strong><small>{proposal.excerpt || "No preview"}</small><div className="inbox-meta"><span className="muted-chip">{proposal.senderName}</span>{proposal.projectId ? <span className="project-tag">{projects.find((project) => project.id === proposal.projectId)?.name}</span> : null}<PriorityChip priority={proposal.priority} /></div><div className="inbox-actions"><Button size="sm" variant="outline" onClick={() => outlook.onAccept(proposal, "tonight")}>Tonight</Button><Button size="sm" variant="outline" onClick={() => outlook.onAccept(proposal, "tomorrow")}>Later</Button><Button size="sm" variant="ghost" onClick={() => outlook.onDismiss(proposal.id)}>Dismiss</Button></div></div>)}</div> : <p className="muted-note">No actionable client email since 8:00 AM IST.</p>}
+          <header className="card-head"><h2><Mail size={14} /> {outlook.proposals.length || outlook.connected ? "Inbox" : "Outlook"}{outlook.proposals.length ? <span className="count-badge">{outlook.proposals.length}</span> : null}</h2><div className="card-actions">{outlook.connected ? <Button variant="ghost" size="icon" aria-label="Sync Outlook" title="Sync calendar now" onClick={outlook.onSync}><RefreshCw size={14} className={outlook.syncing ? "spin" : ""} /></Button> : null}<label className="icon-btn" title="Import saved emails (.eml)" aria-label="Import saved emails"><Upload size={14} /><input type="file" accept=".eml,message/rfc822" multiple hidden onChange={(event) => { const files = Array.from(event.target.files ?? []); if (files.length) outlook.onImportEml(files); event.target.value = ""; }} /></label><Button variant="ghost" size="sm" onClick={outlook.onOpen}>{outlook.connected ? "Manage" : "Connect"}</Button></div></header>
+          {outlook.proposals.length ? <div className="inbox-list">{outlook.proposals.slice(0, 5).map((proposal) => <div className="inbox-item" key={proposal.id}><strong>{proposal.subject}</strong><small>{proposal.excerpt || "No preview"}</small><div className="inbox-meta"><span className="muted-chip">{proposal.senderName}</span>{proposal.projectId ? <span className="project-tag">{projects.find((project) => project.id === proposal.projectId)?.name}</span> : null}<PriorityChip priority={proposal.priority} /></div><div className="inbox-actions"><Button size="sm" variant="outline" onClick={() => outlook.onAccept(proposal, "tonight")}>Tonight</Button><Button size="sm" variant="outline" onClick={() => outlook.onAccept(proposal, "tomorrow")}>Later</Button><Button size="sm" variant="ghost" onClick={() => outlook.onDismiss(proposal.id)}>Dismiss</Button></div></div>)}</div> : <div className="connect-card"><span>{outlook.connected ? "Calendar linked. Import saved emails (.eml) to get task suggestions." : "Link your Outlook calendar and import saved emails to sync meetings and get task suggestions. Read-only."}</span></div>}
         </section>
         <section className="card">
           <header className="card-head"><h2>Meetings <span className="count-badge">{upcomingMeetings.length}</span></h2><div className="card-actions"><label className="icon-btn" title="Import .ics calendar file" aria-label="Import calendar file"><Download size={14} /><input type="file" accept=".ics,text/calendar" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) onImportIcs(file); event.target.value = ""; }} /></label><Button variant="ghost" size="icon" title="Add meeting" aria-label="Add meeting" onClick={onAddMeeting}><Plus size={15} /></Button></div></header>

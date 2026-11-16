@@ -1269,3 +1269,10 @@ button.nav-brand:focus-visible { outline: 1px solid var(--ns-accent); }
 .readonly-note { color: var(--ns-live); }
 .menu-dot { width: 7px; height: 7px; border-radius: 99px; background: var(--ns-live); margin-left: auto; }
 .setup-steps { list-style: decimal; } .setup-steps li::marker { color: var(--ns-accent); font-family: var(--font-label); }
+.warn-note { color: var(--ns-warn); }
+.outlook-upload { display: inline-flex; align-items: center; gap: 8px; width: fit-content; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--ns-accent); color: var(--ns-accent); cursor: pointer; font-size: 13px; transition: background .2s; }
+.outlook-upload:hover { background: var(--ns-accent-soft); }
+details.advanced > summary { cursor: pointer; font-family: var(--font-label); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ns-accent); }
+details.advanced[open] > summary { margin-bottom: 8px; }
+details.advanced > * { margin-top: 8px; } details.advanced > summary { margin-top: 0; }
+.pref-group h3 { display: flex; align-items: center; gap: 6px; }
