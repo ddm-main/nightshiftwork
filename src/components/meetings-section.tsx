@@ -1,10 +1,11 @@
 import { useMemo, useState, type FormEvent } from "react";
-import { CalendarDays, Download, ListChecks, Mail, Plus, Search, Trash2, WandSparkles } from "lucide-react";
+import { CalendarDays, Download, ExternalLink, Link2, ListChecks, Mail, Plus, Search, Trash2, Video, WandSparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Empty, ModalShell, zoneAbbr } from "@/components/ui-kit";
 import { extractActionItems } from "@/lib/actions";
+import { composeMeta, normalizeLinks, parseMeta, type MeetingKind } from "@/lib/meta";
 import { formatClock, getShiftDateKey, getShiftState, isoToIstDateTimeInput, istDateTimeInputToIso } from "@/lib/night-shift";
 import { toast } from "sonner";
 import type { Meeting, Project } from "@/lib/tracker-types";
@@ -27,6 +28,8 @@ export function MeetingsSection({ meetings, projects, now, tz, onOpen, onAdd, on
   const [tab, setTab] = useState<"upcoming" | "past" | "all">("upcoming");
   const [query, setQuery] = useState("");
   const [projectFilter, setProjectFilter] = useState("all");
+  const [kindFilter, setKindFilter] = useState<"all" | MeetingKind>("all");
+  const kindOf = (meeting: Meeting): MeetingKind => parseMeta(meeting.agenda).meta.kind ?? (meeting.project_id ? "external" : "internal");
 
   const upcoming = meetings.filter((meeting) => new Date(meeting.ends_at ?? meeting.starts_at) >= now);
   const past = meetings.filter((meeting) => new Date(meeting.ends_at ?? meeting.starts_at) < now);
@@ -38,9 +41,10 @@ export function MeetingsSection({ meetings, projects, now, tz, onOpen, onAdd, on
     const base = tab === "upcoming" ? upcoming : tab === "past" ? past : meetings;
     return base
       .filter((meeting) => projectFilter === "all" || meeting.project_id === projectFilter)
+      .filter((meeting) => kindFilter === "all" || kindOf(meeting) === kindFilter)
       .filter((meeting) => `${meeting.title} ${meeting.client_name} ${meeting.notes} ${meeting.agenda}`.toLowerCase().includes(query.toLowerCase()))
       .sort((a, b) => tab === "past" ? b.starts_at.localeCompare(a.starts_at) : a.starts_at.localeCompare(b.starts_at));
-  }, [tab, meetings, query, projectFilter, now]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tab, meetings, query, projectFilter, kindFilter, now]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const groups = new Map<string, Meeting[]>();
   for (const meeting of visible) {
@@ -61,10 +65,11 @@ export function MeetingsSection({ meetings, projects, now, tz, onOpen, onAdd, on
       <div className="stat-tile"><span className="stat-label">Upcoming</span><strong className="stat-value tone-cyan">{upcoming.length}</strong><small>{weekAhead} in the next 7 days</small></div>
       <div className="stat-tile"><span className="stat-label">Past</span><strong className="stat-value">{past.length}</strong><small>{missingNotes} without notes</small></div>
       <div className="stat-tile"><span className="stat-label">Action items</span><strong className="stat-value tone-green">{withActions}</strong><small>captured from meetings</small></div>
-      <div className="stat-tile"><span className="stat-label">Client time</span><strong className="stat-value mono-sm">{formatClock(now, tz)}</strong><small>{zoneAbbr(now, tz)} now</small></div>
+      <div className="stat-tile"><span className="stat-label">Internal · External</span><strong className="stat-value">{upcoming.filter((meeting) => kindOf(meeting) === "internal").length}<em> · {upcoming.filter((meeting) => kindOf(meeting) === "external").length}</em></strong><small>upcoming · client time {formatClock(now, tz)} {zoneAbbr(now, tz)}</small></div>
     </div>
     <div className="toolbar">
       <div className="segmented" role="tablist">{(["upcoming", "past", "all"] as const).map((value) => <button key={value} role="tab" aria-selected={tab === value} onClick={() => setTab(value)}>{value}</button>)}</div>
+      <div className="segmented" role="tablist" aria-label="Meeting type">{(["all", "internal", "external"] as const).map((value) => <button key={value} role="tab" aria-selected={kindFilter === value} onClick={() => setKindFilter(value)}>{value}</button>)}</div>
       <div className="search-field"><Search size={15} /><Input aria-label="Search meetings" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search title, client or notes" /></div>
       <select aria-label="Filter by project" value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}><option value="all">All projects</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
     </div>
@@ -80,6 +85,8 @@ export function MeetingsSection({ meetings, projects, now, tz, onOpen, onAdd, on
           return <article className="agenda-item" key={meeting.id} role="button" tabIndex={0} onClick={() => onOpen(meeting)} onKeyDown={(event) => { if (event.key === "Enter") onOpen(meeting); }}>
             <div className="agenda-time"><strong>{formatClock(start, zone)}</strong><small>{zoneAbbr(start, zone)} · {formatClock(start, "Asia/Kolkata")} IST</small></div>
             <div className="agenda-body"><strong>{meeting.title}</strong><span>{[project?.name, meeting.client_name, minutes ? `${minutes} min` : null, getShiftState(start) === "active" ? null : "outside shift hours"].filter(Boolean).join(" · ") || "No client set"}</span>{meeting.action_items.length ? <small className="agenda-actions"><ListChecks size={12} /> {meeting.action_items.length} action item{meeting.action_items.length === 1 ? "" : "s"}</small> : null}</div>
+            <span className={`chip kind ${kindOf(meeting)}`}>{kindOf(meeting)}</span>
+            {parseMeta(meeting.agenda).meta.links[0] ? <a className="join-link" href={parseMeta(meeting.agenda).meta.links[0]} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}><Video size={13} /> Join</a> : null}
             <span className={`chip when ${status.tone}`}>{status.text}</span>
             {meeting.action_items.length ? <Button variant="outline" size="sm" onClick={(event) => { event.stopPropagation(); onTasks(meeting); }}>→ Tasks</Button> : null}
           </article>;
@@ -99,6 +106,10 @@ export function MeetingDialog({ meeting, projects, tz, onClose, onSave, onDelete
   const [client, setClient] = useState(meeting.client_name);
   const [starts, setStarts] = useState(isoToIstDateTimeInput(meeting.starts_at));
   const [ends, setEnds] = useState(meeting.ends_at ? isoToIstDateTimeInput(meeting.ends_at) : "");
+  const parsedAgenda = parseMeta(meeting.agenda);
+  const [agendaBody, setAgendaBody] = useState(parsedAgenda.body);
+  const [kind, setKind] = useState<MeetingKind>(parsedAgenda.meta.kind ?? (meeting.project_id ? "external" : "internal"));
+  const [linksText, setLinksText] = useState(parsedAgenda.meta.links.join("\n"));
   const [dossier, setDossier] = useState(meeting.dossier);
   const [notes, setNotes] = useState(meeting.notes);
   const [actions, setActions] = useState(meeting.action_items.join("\n"));
@@ -110,7 +121,7 @@ export function MeetingDialog({ meeting, projects, tz, onClose, onSave, onDelete
     event.preventDefault();
     if (!title.trim() || !starts) return;
     if (ends && istDateTimeInputToIso(ends) <= istDateTimeInputToIso(starts)) { toast.error("The meeting must end after it starts."); return; }
-    await onSave({ title: title.trim(), project_id: projectId || null, client_name: client.trim(), starts_at: istDateTimeInputToIso(starts), ends_at: ends ? istDateTimeInputToIso(ends) : null, dossier, notes, action_items: items });
+    await onSave({ title: title.trim(), project_id: projectId || null, client_name: client.trim(), starts_at: istDateTimeInputToIso(starts), ends_at: ends ? istDateTimeInputToIso(ends) : null, agenda: composeMeta(agendaBody, { kind, links: normalizeLinks(linksText) }), dossier, notes, action_items: items });
     onClose();
   };
 
@@ -127,9 +138,16 @@ export function MeetingDialog({ meeting, projects, tz, onClose, onSave, onDelete
         <label className="field-label" htmlFor="m-start">Starts · IST<Input id="m-start" type="datetime-local" required value={starts} onChange={(event) => setStarts(event.target.value)} /></label>
         <label className="field-label" htmlFor="m-end">Ends · IST<Input id="m-end" type="datetime-local" value={ends} onChange={(event) => setEnds(event.target.value)} /></label>
       </div>
+      <div className="form-split">
+        <label className="field-label" htmlFor="m-kind">Type<select id="m-kind" value={kind} onChange={(event) => setKind(event.target.value as MeetingKind)}><option value="internal">Internal (team)</option><option value="external">External (client)</option></select></label>
+        <label className="field-label" htmlFor="m-links">Links (join, docs, tickets)<Textarea id="m-links" className="td-links" value={linksText} onChange={(event) => setLinksText(event.target.value)} placeholder="https://…" /></label>
+      </div>
+      {normalizeLinks(linksText).length ? <div className="link-chips">{normalizeLinks(linksText).map((link) => <a key={link} href={link} target="_blank" rel="noreferrer"><Link2 size={12} /> {link.replace(/^https?:\/\//, "").slice(0, 40)} <ExternalLink size={11} /></a>)}</div> : null}
+      <label className="field-label" htmlFor="m-agenda">Agenda</label>
+      <Textarea id="m-agenda" value={agendaBody} onChange={(event) => setAgendaBody(event.target.value)} placeholder="Topics to cover" />
       <label className="field-label" htmlFor="m-dossier">Context</label>
       <Textarea id="m-dossier" value={dossier} onChange={(event) => setDossier(event.target.value)} placeholder="Client context or questions" />
-      <label className="field-label" htmlFor="m-notes">Notes</label>
+      <label className="field-label" htmlFor="m-notes">What happened (notes, decisions)</label>
       <Textarea id="m-notes" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Paste notes or an email — bullets and “Action:” lines become action items" />
       <div className="field-row"><label className="field-label" htmlFor="m-actions">Action items ({items.length})</label><Button type="button" variant="ghost" size="sm" onClick={() => setActions([...new Set([...items, ...extractActionItems(notes)])].join("\n"))}><WandSparkles size={13} /> Extract from notes</Button></div>
       <Textarea id="m-actions" value={actions} onChange={(event) => setActions(event.target.value)} placeholder="One per line" />

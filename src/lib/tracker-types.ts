@@ -18,6 +18,8 @@ export type TaskStep = {
   title: string;
   completed: boolean;
   position: number;
+  completed_at?: string | null;
+  created_at?: string;
 };
 
 export type Task = {
@@ -37,6 +39,8 @@ export type Task = {
   elapsed_seconds: number;
   position: number;
   steps: TaskStep[];
+  created_at?: string;
+  updated_at?: string;
 };
 
 export type Meeting = {
@@ -52,6 +56,7 @@ export type Meeting = {
   notes: string;
   action_items: string[];
   source: "manual" | "outlook";
+  created_at?: string;
 };
 
 export type WorkflowTemplate = {
@@ -93,7 +98,3 @@ export type TrackerData = {
   shifts: Shift[];
   attachments: Attachment[];
 };
-
-export function emptyTrackerData(): TrackerData {
-  return { projects: [], tasks: [], meetings: [], templates: [], shifts: [], attachments: [] };
-}

@@ -18,7 +18,7 @@ export async function loadTrackerData(userId: string): Promise<TrackerData> {
   const stepsByTask = new Map<string, TaskStep[]>();
   for (const step of results[2].data ?? []) {
     const steps = stepsByTask.get(step.task_id) ?? [];
-    steps.push({ id: step.id, title: step.title, completed: step.completed, position: step.position });
+    steps.push({ id: step.id, title: step.title, completed: step.completed, position: step.position, completed_at: step.completed_at, created_at: step.created_at });
     stepsByTask.set(step.task_id, steps);
   }
   const attachmentRows = results[6].data ?? [];
@@ -73,6 +73,9 @@ export type NewTaskInput = {
   steps: string[];
   shift_id: string | null;
   rollover?: boolean;
+  status?: TaskStatus;
+  completed_at?: string | null;
+  elapsed_seconds?: number;
 };
 
 export async function createTask(userId: string, task: NewTaskInput): Promise<Task> {
@@ -141,7 +144,7 @@ export async function saveShift(userId: string, shiftId: string, changes: Partia
 export async function uploadEvidence(userId: string, shiftId: string | null, taskId: string | null, file: File, options: { bucket?: "task-evidence" | "meeting-assets" | "shift-reports"; meetingId?: string | null } = {}): Promise<Attachment> {
   const bucket = options.bucket ?? "task-evidence";
   const objectPath = `${userId}/${shiftId ?? "unassigned"}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
-  const { error: uploadError } = await supabase.storage.from(bucket).upload(objectPath, file, { contentType: file.type || "image/png", upsert: false });
+  const { error: uploadError } = await supabase.storage.from(bucket).upload(objectPath, file, { contentType: file.type || "application/octet-stream", upsert: false });
   if (uploadError) throw new Error(uploadError.message);
   const { data, error } = await supabase.from("shift_attachments").insert({
     user_id: userId,
@@ -151,7 +154,7 @@ export async function uploadEvidence(userId: string, shiftId: string | null, tas
     bucket_id: bucket,
     object_path: objectPath,
     file_name: file.name || "pasted-evidence.png",
-    content_type: file.type || "image/png",
+    content_type: file.type || "application/octet-stream",
   }).select("*").single();
   if (error) {
     await supabase.storage.from(bucket).remove([objectPath]);
@@ -197,7 +200,20 @@ export async function removeTemplate(userId: string, templateId: string): Promis
   if (error) throw new Error(error.message);
 }
 
-export async function saveTemplate(userId: string, templateId: string, changes: Partial<Pick<import("@/lib/tracker-types").WorkflowTemplate, "name" | "steps" | "project_id">>): Promise<void> {
-  const { error } = await supabase.from("workflow_templates").update(changes).eq("id", templateId).eq("user_id", userId);
+export async function renameStep(userId: string, stepId: string, title: string): Promise<void> {
+  const { error } = await supabase.from("task_steps").update({ title }).eq("id", stepId).eq("user_id", userId);
   if (error) throw new Error(error.message);
+}
+
+export async function removeStep(userId: string, stepId: string): Promise<void> {
+  const { error } = await supabase.from("task_steps").delete().eq("id", stepId).eq("user_id", userId);
+  if (error) throw new Error(error.message);
+}
+
+/** Records work that was already done (a finished task with the time it took) on a chosen shift date. */
+export async function logWork(userId: string, entry: { title: string; description: string; project_id: string; shiftDate: string; seconds: number; completedAt: Date }): Promise<Task> {
+  return createTask(userId, {
+    title: entry.title, description: entry.description, project_id: entry.project_id, planning_bucket: "tonight", planned_date: entry.shiftDate,
+    priority: "normal", steps: [], shift_id: null, status: "done", completed_at: entry.completedAt.toISOString(), elapsed_seconds: Math.max(0, Math.round(entry.seconds)),
+  });
 }

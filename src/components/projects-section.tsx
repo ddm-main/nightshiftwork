@@ -1,17 +1,20 @@
 import { useMemo, useState, type FormEvent } from "react";
-import { Archive, ArrowDownToLine, CalendarDays, Check, Clock3, ListChecks, Pencil, Plus, Search, Trash2, Users } from "lucide-react";
+import { Archive, ArrowDownToLine, CalendarDays, Check, ClipboardCheck, Clock3, ListChecks, Pencil, Plus, Search, Trash2, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { BUCKET_COPY, BUCKET_OPTIONS, Empty, ModalShell, PriorityChip, TIMEZONES, shortDuration, zoneAbbr } from "@/components/ui-kit";
+import { ActivityTimeline } from "@/components/activity-timeline";
+import { PlanBoard } from "@/components/plan-board";
+import { buildActivity, groupActivity, type ActivityEntry } from "@/lib/activity";
 import { formatClock } from "@/lib/night-shift";
 import { plannedDateFor } from "@/lib/plan";
 import { createTask, createTemplate, removeTemplate, saveProject } from "@/lib/tracker-store";
 import { totalSeconds } from "@/lib/timers";
-import type { Meeting, PlanBucket, Project, Task, TaskPriority, WorkflowTemplate } from "@/lib/tracker-types";
+import type { Attachment, Meeting, PlanBucket, Project, Task, TaskPriority, WorkflowTemplate } from "@/lib/tracker-types";
 
 const COLORS = ["#38bdf8", "#4ade80", "#fbbf24", "#f472b6", "#a78bfa", "#fb7185"];
-type Tab = "overview" | "tasks" | "meetings" | "workflows" | "notes";
+type Tab = "overview" | "activity" | "tasks" | "plan" | "meetings" | "workflows" | "notes";
 
 function health(open: number, blocked: number, highOpen: number, total: number) {
   if (!total) return { label: "No work yet", tone: "idle" };
@@ -52,8 +55,9 @@ export function ProjectEditDialog({ project, onClose, onSave }: { project: Proje
   </ModalShell>;
 }
 
-export function ProjectsSection({ userId, projects, tasks, meetings, templates, now, activeClientId, busy, onUseClient, onRun, onNewProject, onEditTask, onOpenMeeting }: {
-  userId: string; projects: Project[]; tasks: Task[]; meetings: Meeting[]; templates: WorkflowTemplate[]; now: Date; activeClientId: string; busy: boolean;
+export function ProjectsSection({ userId, projects, tasks, meetings, templates, attachments, now, activeClientId, busy, onUseClient, onRun, onNewProject, onEditTask, onOpenMeeting, onLogWork, onOpenAttachment }: {
+  userId: string; projects: Project[]; tasks: Task[]; meetings: Meeting[]; templates: WorkflowTemplate[]; attachments: Attachment[]; now: Date; activeClientId: string; busy: boolean;
+  onLogWork: (projectId: string) => void; onOpenAttachment: (attachmentId: string) => void;
   onUseClient: (id: string) => void; onRun: (action: () => Promise<unknown>, text?: string) => Promise<void>;
   onNewProject: () => void; onEditTask: (task: Task) => void; onOpenMeeting: (meeting: Meeting) => void;
 }) {
@@ -86,6 +90,12 @@ export function ProjectsSection({ userId, projects, tasks, meetings, templates, 
   const selected = projects.find((project) => project.id === selectedId) ?? listed[0] ?? null;
   const selectedStats = selected ? stats.get(selected.id) : null;
 
+  const activityDays = useMemo(() => groupActivity(buildActivity({ projectId: selected?.id ?? "", tasks, meetings, attachments, now })), [selected?.id, tasks, meetings, attachments, now]);
+  const openActivity = (entry: ActivityEntry) => {
+    if (entry.attachmentId) { onOpenAttachment(entry.attachmentId); return; }
+    if (entry.meetingId) { const meeting = meetings.find((item) => item.id === entry.meetingId); if (meeting) onOpenMeeting(meeting); return; }
+    const task = tasks.find((item) => item.id === entry.taskId); if (task) onEditTask(task);
+  };
   const projectMeetings = selected ? meetings.filter((meeting) => meeting.project_id === selected.id).sort((a, b) => a.starts_at.localeCompare(b.starts_at)) : [];
   const projectFlows = selected ? templates.filter((template) => template.project_id === selected.id || template.project_id === null) : [];
 
@@ -136,6 +146,7 @@ export function ProjectsSection({ userId, projects, tasks, meetings, templates, 
           <div className="detail-actions">
             <span className={`chip health ${health(selectedStats.open, selectedStats.blocked, selectedStats.highOpen, total).tone}`}>{health(selectedStats.open, selectedStats.blocked, selectedStats.highOpen, total).label}</span>
             <Button size="sm" variant={activeClientId === selected.id ? "secondary" : "outline"} onClick={() => onUseClient(selected.id)}>{activeClientId === selected.id ? "Active client" : "Use as client"}</Button>
+            <Button size="sm" variant="outline" onClick={() => onLogWork(selected.id)}><ClipboardCheck size={13} /> Log work</Button>
             <Button size="sm" variant="ghost" onClick={() => setEditing(true)}><Pencil size={13} /> Edit</Button>
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => void onRun(() => saveProject(userId, selected.id, { archived_at: selected.archived_at ? null : new Date().toISOString() }), selected.archived_at ? "Project restored" : "Project archived")}>{selected.archived_at ? <ArrowDownToLine size={13} /> : <Archive size={13} />} {selected.archived_at ? "Restore" : "Archive"}</Button>
           </div>
@@ -147,7 +158,7 @@ export function ProjectsSection({ userId, projects, tasks, meetings, templates, 
           <div className="stat-tile"><span className="stat-label">Logged</span><strong className="stat-value mono-sm">{shortDuration(selectedStats.seconds)}</strong><small>across all shifts</small></div>
           <div className="stat-tile"><span className="stat-label">Meetings</span><strong className="stat-value">{selectedStats.upcoming}</strong><small>upcoming</small></div>
         </div>
-        <div className="segmented tabs" role="tablist">{(["overview", "tasks", "meetings", "workflows", "notes"] as Tab[]).map((value) => <button key={value} role="tab" aria-selected={tab === value} onClick={() => setTab(value)}>{value}</button>)}</div>
+        <div className="segmented tabs" role="tablist">{(["overview", "activity", "tasks", "plan", "meetings", "workflows", "notes"] as Tab[]).map((value) => <button key={value} role="tab" aria-selected={tab === value} onClick={() => setTab(value)}>{value}</button>)}</div>
 
         {tab === "overview" ? <div className="detail-grid">
           <section className="card"><header className="card-head"><h2>Progress</h2></header>
@@ -162,8 +173,13 @@ export function ProjectsSection({ userId, projects, tasks, meetings, templates, 
           </section>
           <section className="card"><header className="card-head"><h2>Needs attention <span className="count-badge">{attention.length}</span></h2></header>{attention.length ? <div className="row-list">{attention.map((task) => <button className="row-item" key={task.id} onClick={() => onEditTask(task)}><span className="row-title">{task.title}</span><PriorityChip priority={task.priority} />{task.status === "blocked" ? <span className="chip warn">Blocked</span> : null}</button>)}</div> : <p className="muted-note">Nothing blocked or urgent.</p>}</section>
           <section className="card"><header className="card-head"><h2>Next meetings</h2></header>{projectMeetings.filter((meeting) => new Date(meeting.starts_at) >= now).slice(0, 3).map((meeting) => <button className="row-item" key={meeting.id} onClick={() => onOpenMeeting(meeting)}><CalendarDays size={14} /><span className="row-title">{meeting.title}</span><small>{formatClock(new Date(meeting.starts_at), selected.timezone)} {zoneAbbr(new Date(meeting.starts_at), selected.timezone)}</small></button>)}{!projectMeetings.some((meeting) => new Date(meeting.starts_at) >= now) ? <p className="muted-note">No upcoming meetings.</p> : null}</section>
+          <section className="card span-2"><header className="card-head"><h2>Recent activity</h2><Button size="sm" variant="ghost" onClick={() => setTab("activity")}>See all →</Button></header><ActivityTimeline days={activityDays.slice(0, 2)} onOpen={openActivity} empty="Nothing recorded yet. Add a task or log work to start this project’s history." /></section>
           <section className="card"><header className="card-head"><h2>Details</h2></header><dl className="facts"><div><dt>Client</dt><dd>{selected.client_name || "—"}</dd></div><div><dt>Time zone</dt><dd>{selected.timezone.replace("_", " ")}</dd></div><div><dt>Domains</dt><dd>{selected.domain_rules.join(", ") || "—"}</dd></div></dl></section>
         </div> : null}
+
+        {tab === "activity" ? <section className="card"><header className="card-head"><h2>Day by day <span className="count-badge">{activityDays.length}</span></h2><Button size="sm" variant="outline" onClick={() => onLogWork(selected.id)}><ClipboardCheck size={13} /> Log work</Button></header><ActivityTimeline days={activityDays} onOpen={openActivity} empty="Nothing recorded yet. Add a task or log work to start this project’s history." /></section> : null}
+
+        {tab === "plan" ? <PlanBoard fixedProjectId={selected.id} userId={userId} allProjects={projects} projects={projects.filter((project) => !project.archived_at)} tasks={tasks} templates={templates} now={now} activeClientId={activeClientId} busy={busy} onRun={onRun} onEditTask={onEditTask} /> : null}
 
         {tab === "tasks" ? <section className="card"><header className="card-head"><h2>Tasks <span className="count-badge">{tasksShown.length}</span></h2><div className="segmented small">{(["open", "blocked", "done", "all"] as const).map((value) => <button key={value} aria-selected={taskFilter === value} onClick={() => setTaskFilter(value)}>{value}</button>)}</div></header>{tasksShown.length ? <div className="row-list">{tasksShown.map((task) => <button className="row-item task" key={task.id} onClick={() => onEditTask(task)}><span className={`replay-check${task.status === "done" ? " done" : ""}`}>{task.status === "done" ? <Check size={11} /> : null}</span><span className="row-title">{task.title}</span><span className="muted-chip">{BUCKET_COPY[task.planning_bucket]}</span><PriorityChip priority={task.priority} /><small>{task.steps.filter((step) => step.completed).length}/{task.steps.length}</small><small>{shortDuration(totalSeconds(task, now))}</small></button>)}</div> : <Empty icon={<ListChecks size={18} />} text="No tasks in this view" />}</section> : null}
 

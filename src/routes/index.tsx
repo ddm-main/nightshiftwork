@@ -7,6 +7,7 @@ import {
   Sparkles, Trash2, Upload, Users, 
   Activity, Bell, SlidersHorizontal,
   Mail, RefreshCw,
+  ClipboardCheck,
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Toaster, toast } from "sonner";
@@ -15,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { LogWorkDialog } from "@/components/activity-timeline";
 import { ClockMenu } from "@/components/clock-menu";
 import { OutlookDialog } from "@/components/outlook-dialog";
 import { completeLogin, domainMatches, eventToMeeting, fetchCalendar, fetchInbox, getClientId as getMsClientId, getTokens as getMsTokens, isConnected as isMsConnected, setClientId as setMsClientId, signOutMicrosoft, startLogin, triageEmails, type EmailProposal } from "@/lib/microsoft";
@@ -22,7 +24,8 @@ import { MeetingDialog, MeetingsSection } from "@/components/meetings-section";
 import { PlanBoard } from "@/components/plan-board";
 import { PreferencesDialog } from "@/components/preferences";
 import { ProjectsSection } from "@/components/projects-section";
-import { TaskEditDialog, type TaskEdit } from "@/components/task-dialogs";
+import { TaskDetailDialog, type TaskEdit } from "@/components/task-detail";
+import { classifyMeeting, composeMeta, extractLinks, normalizeLinks, parseMeta, type MeetingKind } from "@/lib/meta";
 import { DEFAULT_PREFS, loadPrefs, savePrefs, type Prefs } from "@/lib/prefs";
 import { plannedDateFor } from "@/lib/plan";
 import { runningSeconds, totalSeconds } from "@/lib/timers";
@@ -40,9 +43,9 @@ import {
   istDateTimeInputToIso, nextGapChange, getReportingAnchor, setClockFormat,
 } from "@/lib/night-shift";
 import {
-  addTaskStep, removeTask, createMeeting, removeMeeting, saveMeeting, createProject, createTask, ensureShift,
+  addTaskStep, removeTask, removeStep, renameStep, createMeeting, removeMeeting, saveMeeting, createProject, createTask, ensureShift,
   loadTrackerData, removeAttachment, saveShift,
-  setStepComplete, taskStatusChanges, updateAttachment, updateTask, uploadEvidence, uploadReport,
+  setStepComplete, taskStatusChanges, updateAttachment, updateTask, uploadEvidence, uploadReport, logWork,
 } from "@/lib/tracker-store";
 import type { Attachment, Meeting, PlanBucket, Project, Shift, Task, TaskPriority, TrackerData, WorkflowTemplate } from "@/lib/tracker-types";
 
@@ -145,13 +148,16 @@ function NightShiftApp() {
   const [clientId, setClientIdState] = useState("");
   const [meetingDetailId, setMeetingDetailId] = useState<string | null>(null);
   const [pasteOpen, setPasteOpen] = useState(false);
-  const [menu, setMenu] = useState<"bell" | "account" | null>(null);
+  const [menu, setMenu] = useState<"bell" | "account" | "new" | null>(null);
+  const [logWorkFor, setLogWorkFor] = useState<string | null>(null);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [prefs, setPrefsState] = useState<Prefs>(DEFAULT_PREFS);
   useEffect(() => { setPrefsState(loadPrefs()); }, []);
   const setPrefs = (next: Prefs) => { setPrefsState(next); savePrefs(next); };
   setClockFormat({ hour12: prefs.hour12, seconds: prefs.seconds });
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const editingTaskRef = useRef<string | null>(null);
+  editingTaskRef.current = editingTaskId;
   const [outlookOpen, setOutlookOpen] = useState(false);
   const [msClient, setMsClientState] = useState("");
   const [msConnected, setMsConnected] = useState(false);
@@ -352,6 +358,12 @@ function NightShiftApp() {
     }), "Task updated");
   }
 
+  async function saveWorkLog(entry: { title: string; description: string; project_id: string; shiftDate: string; minutes: number }) {
+    if (!user) return;
+    const completedAt = entry.shiftDate === currentShiftKey ? now : new Date(`${entry.shiftDate}T22:00:00+05:30`);
+    await runAction(() => logWork(user.id, { title: entry.title, description: entry.description, project_id: entry.project_id, shiftDate: entry.shiftDate, seconds: entry.minutes * 60, completedAt }), "Work logged");
+  }
+
   async function deleteTask(task: Task) {
     if (!user) return;
     await runAction(() => removeTask(user.id, task.id), "Task deleted");
@@ -369,9 +381,13 @@ function NightShiftApp() {
 
   async function onEvidence(file: File, taskId: string | null) {
     if (!user) return;
-    const imageFile = file.type.startsWith("image/") ? file : null;
-    if (!imageFile) { toast.error("Paste or choose an image file for shift evidence."); return; }
-    setEvidenceInput({ file: imageFile, taskId });
+    if (file.type.startsWith("image/")) { setEvidenceInput({ file, taskId }); return; } // screenshots open the markup editor first
+    await saveEvidence(file, taskId, false);
+  }
+
+  async function uploadFiles(files: File[], taskId: string) {
+    if (files.length === 1) { await onEvidence(files[0]!, taskId); return; }
+    for (const file of files) await saveEvidence(file, taskId, false);
   }
 
   async function saveMeetingFile(meeting: Meeting, file: File) {
@@ -382,12 +398,12 @@ function NightShiftApp() {
     }, "Meeting file saved privately");
   }
 
-  async function saveEvidence(file: File, taskId: string | null) {
+  async function saveEvidence(file: File, taskId: string | null, open = true) {
     if (!user) return;
     await runAction(async () => {
       const added = await uploadEvidence(user.id, shift?.id ?? null, taskId, file);
       setData((current) => ({ ...current, attachments: [added, ...current.attachments] }));
-      setSelectedAttachment(added.id);
+      if (open) setSelectedAttachment(added.id);
       setEvidenceInput(null);
     }, "Evidence saved privately");
   }
@@ -425,7 +441,7 @@ function NightShiftApp() {
       const fresh = events.filter((event, index) => { const key = `${event.title}|${event.startsAt}`; if (known.has(key)) return false; known.add(key); return events.findIndex((other) => `${other.title}|${other.startsAt}` === key) === index; });
       for (const event of fresh) {
         const owner = data.projects.find((project) => !project.archived_at && domainMatches(event.organizerEmail, project.domain_rules));
-        await createMeeting(user.id, { shift_id: null, project_id: owner?.id ?? null, title: event.title, client_name: owner?.client_name ?? "", starts_at: event.startsAt, ends_at: event.endsAt, agenda: "", dossier: event.description, notes: "", action_items: [] }, "outlook");
+        await createMeeting(user.id, { shift_id: null, project_id: owner?.id ?? null, title: event.title, client_name: owner?.client_name ?? "", starts_at: event.startsAt, ends_at: event.endsAt, agenda: composeMeta("", { kind: classifyMeeting(event.organizerEmail, user.email ?? "", Boolean(owner)), links: extractLinks(event.description) }), dossier: event.description, notes: "", action_items: [] }, "outlook");
       }
       if (msConnected) {
         try {
@@ -501,7 +517,7 @@ function NightShiftApp() {
     await runAction(async () => {
       for (const event of fresh) {
         const owner = data.projects.find((project) => !project.archived_at && domainMatches(event.organizerEmail, project.domain_rules));
-        await createMeeting(user.id, { shift_id: shift?.id ?? null, project_id: owner?.id ?? null, title: event.title, client_name: owner?.client_name ?? "", starts_at: event.startsAt, ends_at: event.endsAt, agenda: "", dossier: event.description, notes: "", action_items: [] });
+        await createMeeting(user.id, { shift_id: shift?.id ?? null, project_id: owner?.id ?? null, title: event.title, client_name: owner?.client_name ?? "", starts_at: event.startsAt, ends_at: event.endsAt, agenda: composeMeta("", { kind: classifyMeeting(event.organizerEmail, user.email ?? "", Boolean(owner)), links: extractLinks(event.description) }), dossier: event.description, notes: "", action_items: [] }, "manual");
       }
     }, fresh.length ? `${fresh.length} meeting${fresh.length === 1 ? "" : "s"} imported` : "Everything in that file is already imported");
   }
@@ -542,7 +558,7 @@ function NightShiftApp() {
     const file = imageItem?.getAsFile();
     if (file && user) {
       event.preventDefault();
-      void onEvidence(file, null);
+      void onEvidence(file, editingTaskRef.current);
     }
   }
 
@@ -637,6 +653,15 @@ function NightShiftApp() {
           <NavButton section="archive" active={activeSection} setActive={setActiveSection} icon={<Archive size={15} />} label="Archive" />
         </nav>
         <div className="nav-right">
+          <div className="menu-wrap">
+            <button className="new-btn" aria-label="Create new" aria-expanded={menu === "new"} onClick={() => setMenu(menu === "new" ? null : "new")}><Plus size={14} /><span>New</span></button>
+            {menu === "new" ? <div className="popover small" role="menu">
+              <button role="menuitem" className="menu-item" onClick={() => { setMenu(null); setModal("template"); }}><ListChecks size={14} /> Task</button>
+              <button role="menuitem" className="menu-item" onClick={() => { setMenu(null); setLogWorkFor(clientProject?.id ?? ""); }}><ClipboardCheck size={14} /> Log work done</button>
+              <button role="menuitem" className="menu-item" onClick={() => { setMenu(null); setModal("meeting"); }}><CalendarDays size={14} /> Meeting</button>
+              <button role="menuitem" className="menu-item" onClick={() => { setMenu(null); setModal("project"); }}><Users size={14} /> Project</button>
+            </div> : null}
+          </div>
           <ClockMenu now={now} clientTz={clientTz} clientId={clientProject?.id ?? ""} projects={projects} onClient={setClientId} shiftState={shiftState} shiftStart={shiftStart} shiftEnd={shiftEnd} nextShift={nextShift} gapChange={gapChange} />
           <div className="menu-wrap">
             <button className={`icon-nav${unreadNotices.some((notice) => notice.tone !== "info") ? " has-alert" : ""}`} aria-label={`Notifications (${unreadNotices.length} unread)`} aria-expanded={menu === "bell"} onClick={() => setMenu(menu === "bell" ? null : "bell")}><Bell size={16} />{unreadNotices.length ? <span className="bell-badge">{unreadNotices.length}</span> : null}</button>
@@ -652,7 +677,7 @@ function NightShiftApp() {
         {loadError ? <div className="error-banner" role="alert"><span>{loadError}</span><Button variant="outline" size="sm" onClick={() => { setLoadError(""); void refresh(); }}>Retry</Button></div> : null}
         {activeSection === "shift" ? <ShiftSection {...{ allProjects: data.projects, outlook: { connected: outlookLinked, onImportEml: (files: File[]) => void importEml(files), syncing: msSyncing, proposals: visibleProposals, onOpen: () => setOutlookOpen(true), onSync: () => void syncRef.current(false), onAccept: (proposal: EmailProposal, bucket: PlanBucket) => void acceptProposal(proposal, bucket), onDismiss: dismissProposal }, onEditTask: (task: Task) => setEditingTaskId(task.id), headActions, onTile: (kind: "projects" | "archive" | "meeting" | "planner") => { if (kind === "meeting") { const next = upcomingMeetings.filter((meeting) => new Date(meeting.starts_at) > now).sort((a, b) => a.starts_at.localeCompare(b.starts_at))[0]; if (next) setMeetingDetailId(next.id); else setActiveSection("meetings"); } else setActiveSection(kind); }, now, shift, shiftState, shiftStart, shiftEnd, progress, nextShift, projects, tasks, tonightTasks, completedTonight, upcomingMeetings, activeMeeting, attachments: data.attachments, clientTz, onQuickAdd: (text: string, projectId: string, priority: TaskPriority) => void quickAddTask(text, projectId, priority), activeClientId: clientProject?.id ?? "", onPull: (task: Task) => void pullTask(task), onOpenMeeting: (meeting: Meeting) => setMeetingDetailId(meeting.id), onImportIcs: (file: File) => void importIcs(file), onPasteNotes: () => setPasteOpen(true), onTaskTimer: toggleTaskTimer, onTaskComplete: handleTaskComplete, onStepChange: handleStepChange, onAddStep: handleAddStep, onAddTask: () => setModal("template"), onAddMeeting: () => setModal("meeting"), onWrap: () => setModal("wrap"), onPaste: (file, taskId) => void onEvidence(file, taskId), onAttachment: setSelectedAttachment, busy, onMeetingFile: saveMeetingFile, onNotes: (text: string) => { if (user && shift) void saveShift(user.id, shift.id, { focus_notes: text }).catch(() => toast.error("Scratchpad could not be saved")); } }} /> : null}
         {activeSection === "meetings" ? <MeetingsSection meetings={data.meetings} projects={projects} now={now} tz={clientTz} onOpen={(meeting) => setMeetingDetailId(meeting.id)} onAdd={() => setModal("meeting")} onImport={(file) => void importIcs(file)} onTasks={(meeting) => void tasksFromItems(meeting.action_items, meeting.project_id)} outlookConnected={outlookLinked} outlookSyncing={msSyncing} onOutlook={() => { if (outlookLinked) void syncRef.current(false); else setOutlookOpen(true); }} /> : null}
-        {activeSection === "projects" ? <ProjectsSection userId={user.id} projects={data.projects} tasks={tasks} meetings={data.meetings} templates={data.templates} now={now} activeClientId={clientProject?.id ?? ""} busy={busy} onUseClient={(id) => { setClientId(id); toast.success("Active client updated"); }} onRun={runAction} onNewProject={() => setModal("project")} onEditTask={(task) => setEditingTaskId(task.id)} onOpenMeeting={(meeting) => setMeetingDetailId(meeting.id)} /> : null}
+        {activeSection === "projects" ? <ProjectsSection userId={user.id} projects={data.projects} tasks={tasks} meetings={data.meetings} templates={data.templates} attachments={data.attachments} onLogWork={(projectId) => setLogWorkFor(projectId)} onOpenAttachment={(attachmentId) => setSelectedAttachment(attachmentId)} now={now} activeClientId={clientProject?.id ?? ""} busy={busy} onUseClient={(id) => { setClientId(id); toast.success("Active client updated"); }} onRun={runAction} onNewProject={() => setModal("project")} onEditTask={(task) => setEditingTaskId(task.id)} onOpenMeeting={(meeting) => setMeetingDetailId(meeting.id)} /> : null}
         {activeSection === "planner" ? <PlanBoard userId={user.id} allProjects={data.projects} projects={projects} tasks={tasks} templates={data.templates} now={now} activeClientId={clientProject?.id ?? ""} busy={busy} onRun={runAction} onEditTask={(task) => setEditingTaskId(task.id)} /> : null}
         {activeSection === "archive" ? <ArchiveSection {...{ clientTz, data, now, month: archiveMonth, setMonth: setArchiveMonth, day: archiveDay, setDay: setArchiveDay, search, setSearch, onAttachment: setSelectedAttachment }} /> : null}
       </section>
@@ -662,8 +687,9 @@ function NightShiftApp() {
       {modal === "template" ? <TaskModal defaultProjectId={clientProject?.id ?? ""} userId={user.id} shiftId={shift?.id ?? null} projects={projects} templates={data.templates} defaultBucket="tonight" onClose={() => setModal(null)} onSave={async (task) => { await runAction(async () => { await createTask(user.id, task); }, "Task added to tonight"); setModal(null); }} /> : null}
       {modal === "wrap" ? <WrapModal shift={shift} tasks={tasks} onClose={() => setModal(null)} onSave={updateWrapUp} onCopy={copyShiftMessage} busy={busy} /> : null}
       {meetingForDialog ? <MeetingDialog key={meetingForDialog.id} meeting={meetingForDialog} projects={projects} tz={clientTz} onClose={() => setMeetingDetailId(null)} onSave={(changes) => saveMeetingDetail(meetingForDialog.id, changes)} onDelete={() => deleteMeeting(meetingForDialog)} onCreateTasks={(items, projectId) => tasksFromItems(items, projectId)} /> : null}
-      {editingTask ? <TaskEditDialog key={editingTask.id} task={editingTask} projects={projects} onClose={() => setEditingTaskId(null)} onSave={(changes) => editTask(editingTask, changes)} onDelete={() => deleteTask(editingTask)} /> : null}
+      {editingTask ? <TaskDetailDialog key={editingTask.id} task={editingTask} projects={projects} attachments={data.attachments.filter((attachment) => attachment.task_id === editingTask.id)} now={now} busy={busy} onClose={() => setEditingTaskId(null)} onSave={(changes) => editTask(editingTask, changes)} onDelete={() => deleteTask(editingTask)} onToggleStep={(stepId, checked) => void handleStepChange(stepId, checked)} onAddStep={(title) => void handleAddStep(editingTask, title)} onRenameStep={(stepId, title) => void runAction(() => renameStep(user.id, stepId, title))} onRemoveStep={(stepId) => void runAction(() => removeStep(user.id, stepId), "Step removed")} onUpload={(files) => void uploadFiles(files, editingTask.id)} onOpenAttachment={(attachment) => setSelectedAttachment(attachment.id)} /> : null}
       {outlookOpen ? <OutlookDialog icsUrl={icsUrl} onIcsUrl={setIcsUrlState} onSaveIcs={() => { const valid = validateCalendarUrl(icsUrl); if (!valid) return; const clean = valid.toString(); setIcsUrlState(clean); setIcsSaved(clean); try { localStorage.setItem("ns-ics-url", clean); } catch { /* ignore */ } void syncRef.current(false, clean); }} onRemoveIcs={() => { setIcsUrlState(""); setIcsSaved(""); try { localStorage.removeItem("ns-ics-url"); } catch { /* ignore */ } toast.success("Calendar link removed"); }} onImportEml={(files) => void importEml(files)} clientId={msClient} onClientId={(id) => { setMsClientState(id); setMsClientId(id); }} account={msAccount} connected={msConnected} redirectUris={knownOrigins(window.location.origin).map((origin) => `${origin}/`)} syncing={msSyncing} lastSync={msLastSync} onConnect={() => void startLogin(msClient.trim(), `${window.location.origin}/`)} onDisconnect={() => { signOutMicrosoft(); setMsConnected(false); setMsAccount(null); setProposals([]); setMsLastSync(null); toast.success("Outlook disconnected"); }} onSync={() => void syncRef.current(false)} onClose={() => setOutlookOpen(false)} /> : null}
+      {logWorkFor !== null ? <LogWorkDialog projects={projects} defaultProjectId={logWorkFor || clientProject?.id || ""} today={currentShiftKey} onClose={() => setLogWorkFor(null)} onSave={saveWorkLog} /> : null}
       {prefsOpen ? <PreferencesDialog prefs={prefs} onChange={setPrefs} projects={projects} clientId={clientProject?.id ?? ""} onClient={setClientId} onClose={() => setPrefsOpen(false)} /> : null}
       {pasteOpen ? <PasteNotesDialog onClose={() => setPasteOpen(false)} onCreate={(items) => tasksFromItems(items, clientProject?.id ?? null)} /> : null}
       {evidenceInput ? <EvidenceDialog file={evidenceInput.file} busy={busy} onClose={() => setEvidenceInput(null)} onSave={(file) => void saveEvidence(file, evidenceInput.taskId)} /> : null}
@@ -758,6 +784,24 @@ function ShiftSection(props: {
       </div>
       <div className="dash-head-actions">{headActions}</div>
     </div>
+    {(() => {
+      const focus = running ?? tonightTasks.find((task) => task.status !== "done" && task.status !== "blocked");
+      if (!focus) return <div className="now-bar idle"><span className="now-label">Idle</span><span>No open tasks for this shift. Add one below or pull something from Up next.</span></div>;
+      const stepsDone = focus.steps.filter((step) => step.completed).length;
+      return <div className={`now-bar${running ? " live" : ""}`}>
+        <span className="now-label">{running ? "Working on" : "Up next"}</span>
+        <strong className="now-title">{focus.title}</strong>
+        <span className="project-tag">{projectName(focus.project_id) ?? "No project"}</span>
+        <PriorityChip priority={focus.priority} />
+        {focus.steps.length ? <span className="now-steps">{stepsDone}/{focus.steps.length} steps</span> : null}
+        <span className="now-time">{relativeDuration(totalSeconds(focus, now))}</span>
+        <div className="now-actions">
+          <Button size="sm" variant={running ? "secondary" : "outline"} disabled={busy || (!running && shiftState !== "active")} onClick={() => onTaskTimer(focus)}>{running ? <><Pause size={13} /> Pause</> : <><Play size={13} /> Start</>}</Button>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => onTaskComplete(focus, true)}><Check size={13} /> Done</Button>
+          <Button size="sm" variant="ghost" onClick={() => onEditTask(focus)}>Details</Button>
+        </div>
+      </div>;
+    })()}
     <div className="stat-row">
       <div className="stat-tile tile-wide"><span className="stat-label">Shift · 5:30 PM → 3:30 AM IST</span><strong className="stat-value">{shiftState === "active" ? `${Math.round(progress)}%` : shiftState === "after" ? "Done" : "Standby"}</strong><div className="progress-track"><span style={{ width: `${shiftState === "active" ? progress : 0}%` }} /></div></div>
       <div className="stat-tile"><span className="stat-label">Tasks</span><strong className="stat-value tone-green">{completedTonight}<em>/{tonightTasks.length}</em></strong><div className="mini-bar"><span style={{ width: `${taskPct}%` }} /></div></div>
@@ -838,10 +882,10 @@ function TaskCard({ task, project, index, now, shiftEnd, shiftActive, attachment
   const submitStep = (event: FormEvent) => { event.preventDefault(); const value = stepDraft.trim(); if (!value) return; onAddStep(value); setStepDraft(""); };
   return <article className={`task-card${task.status === "in_progress" ? " task-running" : ""}${task.status === "done" ? " is-done" : ""}`}>
     <div className="task-main-row"><div className="task-index">{String(index + 1).padStart(2, "0")}</div><Checkbox checked={task.status === "done"} onCheckedChange={(value) => onComplete(value === true)} aria-label={`Mark ${task.title} ${task.status === "done" ? "incomplete" : "complete"}`} disabled={busy} />
-      <button className="task-title-area" onClick={() => setExpanded(!expanded)}><span className={task.status === "done" ? "task-title is-done" : "task-title"}>{task.title}</span><span className="task-subtitle"><span>{project?.name ?? "No project"}</span><span className={`priority-chip p-${task.priority}`}>{task.priority === "high" ? "HIGH" : task.priority === "low" ? "LOW" : "MEDIUM"}</span>{task.status === "blocked" ? <span className="chip warn small">BLOCKED</span> : null}{task.rollover ? <span className="rollover-chip">ROLLED OVER</span> : null}</span></button>
+      <button className="task-title-area" onClick={() => setExpanded(!expanded)}><span className={task.status === "done" ? "task-title is-done" : "task-title"}>{task.title}</span><span className="task-subtitle"><span>{project?.name ?? "No project"}</span><span className={`priority-chip p-${task.priority}`}>{task.priority === "high" ? "HIGH" : task.priority === "low" ? "LOW" : "MEDIUM"}</span>{parseMeta(task.description).meta.tags.slice(0, 3).map((tag) => <span className="tag-chip" key={tag}>#{tag}</span>)}{attachments.length ? <span className="muted-chip">📎 {attachments.length}</span> : null}{task.status === "blocked" ? <span className="chip warn small">BLOCKED</span> : null}{task.rollover ? <span className="rollover-chip">ROLLED OVER</span> : null}</span></button>
       <div className="task-trailing">{task.steps.length ? <button className="checklist-count" onClick={() => setExpanded(!expanded)}><ListChecks size={14} />{task.steps.length - remaining}/{task.steps.length}</button> : null}<span className={task.status === "in_progress" ? "task-timer timer-live" : "task-timer"}><Clock3 size={13} />{relativeDuration(elapsed)}</span><Button className="timer-btn" variant={task.status === "in_progress" ? "secondary" : "outline"} size="icon" aria-label={task.status === "in_progress" ? `Pause ${task.title}` : `Start timer for ${task.title}`} title={task.status === "in_progress" ? "Pause timer" : shiftActive ? "Start timer" : "Timers work only during shift hours"} onClick={onTimer} disabled={busy || (task.status !== "in_progress" && !shiftActive)}>{task.status === "in_progress" ? <Pause size={15} /> : <Play size={15} />}</Button><button className="icon-mini" aria-label={`Edit ${task.title}`} title="Edit task" onClick={onEdit}><Pencil size={14} /></button><button className="expand-task" aria-label={`${expanded ? "Collapse" : "Expand"} ${task.title}`} onClick={() => setExpanded(!expanded)}><ChevronDown size={15} className={expanded ? "rotate-chevron" : ""} /></button></div>
     </div>
-    {expanded ? <div className="task-details"><p className="task-description">{task.description || "No notes added yet."}</p>{task.steps.length ? <div className="step-list">{task.steps.map((step) => <label className={`step-row${step.completed ? " step-done" : ""}`} key={step.id}><Checkbox checked={step.completed} onCheckedChange={(value) => onStepChange(step.id, value === true)} aria-label={`Mark step ${step.title}`} /><span>{step.title}</span></label>)}</div> : null}<form className="add-step-row" onSubmit={submitStep}><Input value={stepDraft} onChange={(event) => setStepDraft(event.target.value)} aria-label={`Add a checklist step to ${task.title}`} placeholder="Add a step…" /><Button variant="ghost" size="icon" type="submit" aria-label="Add checklist step" disabled={!stepDraft.trim()}><Plus size={16} /></Button></form>{attachments.length ? <div className="task-attachments">{attachments.map((attachment) => <button key={attachment.id} onClick={() => onAttachment(attachment.id)}><FileImage size={14} />{attachment.file_name}</button>)}</div> : null}<label className="task-attach"><ImagePlus size={14} /> Attach evidence<input type="file" accept="image/*" aria-label={`Attach evidence to ${task.title}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) onPaste(file); event.target.value = ""; }} /></label></div> : null}
+    {expanded ? <div className="task-details"><p className="task-description">{parseMeta(task.description).body || "No notes added yet."}</p>{task.steps.length ? <div className="step-list">{task.steps.map((step) => <label className={`step-row${step.completed ? " step-done" : ""}`} key={step.id}><Checkbox checked={step.completed} onCheckedChange={(value) => onStepChange(step.id, value === true)} aria-label={`Mark step ${step.title}`} /><span>{step.title}</span></label>)}</div> : null}<form className="add-step-row" onSubmit={submitStep}><Input value={stepDraft} onChange={(event) => setStepDraft(event.target.value)} aria-label={`Add a checklist step to ${task.title}`} placeholder="Add a step…" /><Button variant="ghost" size="icon" type="submit" aria-label="Add checklist step" disabled={!stepDraft.trim()}><Plus size={16} /></Button></form>{attachments.length ? <div className="task-attachments">{attachments.map((attachment) => <button key={attachment.id} onClick={() => onAttachment(attachment.id)}><FileImage size={14} />{attachment.file_name}</button>)}</div> : null}<label className="task-attach"><ImagePlus size={14} /> Attach evidence<input type="file" accept="image/*" aria-label={`Attach evidence to ${task.title}`} onChange={(event) => { const file = event.target.files?.[0]; if (file) onPaste(file); event.target.value = ""; }} /></label></div> : null}
   </article>;
 }
 
@@ -961,9 +1005,9 @@ function ProjectModal({ userId, onClose, onSave }: { userId: string; onClose: ()
 }
 
 function MeetingModal({ userId, shiftId, projects, onClose, onSave }: { userId: string; shiftId: string | null; projects: Project[]; onClose: () => void; onSave: (meeting: Omit<Meeting, "id" | "source">) => Promise<void> }) {
-  const [title, setTitle] = useState(""); const [client, setClient] = useState(""); const [projectId, setProjectId] = useState(""); const [starts, setStarts] = useState(""); const [ends, setEnds] = useState(""); const [agenda, setAgenda] = useState(""); const [dossier, setDossier] = useState(""); const [saving, setSaving] = useState(false);
-  const save = async (event: FormEvent) => { event.preventDefault(); if (!title.trim() || !starts) return; if (ends && istDateTimeInputToIso(ends) <= istDateTimeInputToIso(starts)) { toast.error("The meeting must end after it starts."); return; } setSaving(true); try { await onSave({ shift_id: shiftId, project_id: projectId || null, title: title.trim(), client_name: client.trim(), starts_at: istDateTimeInputToIso(starts), ends_at: ends ? istDateTimeInputToIso(ends) : null, agenda: agenda.trim(), dossier: dossier.trim(), notes: "", action_items: [], }); } finally { setSaving(false); } };
-  return <ModalShell title="Add a meeting" description="Add it in IST; it will also show its local time in New York." onClose={onClose}><form className="modal-form" onSubmit={save}><label className="field-label" htmlFor="meeting-title">Meeting</label><Input id="meeting-title" autoFocus required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="e.g. Weekly project review" /><label className="field-label" htmlFor="meeting-client">Client</label><Input id="meeting-client" value={client} onChange={(event) => setClient(event.target.value)} placeholder="Client or company" /><label className="field-label" htmlFor="meeting-project">Project</label><select id="meeting-project" value={projectId} onChange={(event) => { setProjectId(event.target.value); const picked = projects.find((item) => item.id === event.target.value); if (picked && !client.trim()) setClient(picked.client_name); }}><option value="">No project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><div className="form-split"><label className="field-label" htmlFor="meeting-start">Starts · IST<input id="meeting-start" type="datetime-local" required value={starts} onChange={(event) => setStarts(event.target.value)} /></label><label className="field-label" htmlFor="meeting-end">Ends · IST<input id="meeting-end" type="datetime-local" value={ends} onChange={(event) => setEnds(event.target.value)} /></label></div><label className="field-label" htmlFor="meeting-agenda">Agenda</label><Textarea id="meeting-agenda" value={agenda} onChange={(event) => setAgenda(event.target.value)} placeholder="Topics to cover" /><label className="field-label" htmlFor="meeting-dossier">Pre-meeting dossier</label><Textarea id="meeting-dossier" value={dossier} onChange={(event) => setDossier(event.target.value)} placeholder="Client context, recent work, or questions" /><div className="modal-actions"><Button type="button" variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving || !title.trim() || !starts}>{saving ? <LoaderCircle size={15} className="spin" /> : <CalendarDays size={15} />} Save meeting</Button></div></form></ModalShell>;
+  const [title, setTitle] = useState(""); const [client, setClient] = useState(""); const [projectId, setProjectId] = useState(""); const [starts, setStarts] = useState(""); const [ends, setEnds] = useState(""); const [agenda, setAgenda] = useState(""); const [kind, setKind] = useState<MeetingKind>("internal"); const [linksText, setLinksText] = useState(""); const [dossier, setDossier] = useState(""); const [saving, setSaving] = useState(false);
+  const save = async (event: FormEvent) => { event.preventDefault(); if (!title.trim() || !starts) return; if (ends && istDateTimeInputToIso(ends) <= istDateTimeInputToIso(starts)) { toast.error("The meeting must end after it starts."); return; } setSaving(true); try { await onSave({ shift_id: shiftId, project_id: projectId || null, title: title.trim(), client_name: client.trim(), starts_at: istDateTimeInputToIso(starts), ends_at: ends ? istDateTimeInputToIso(ends) : null, agenda: composeMeta(agenda, { kind, links: normalizeLinks(linksText) }), dossier: dossier.trim(), notes: "", action_items: [], }); } finally { setSaving(false); } };
+  return <ModalShell title="Add a meeting" description="Add it in IST; it will also show its local time in New York." onClose={onClose}><form className="modal-form" onSubmit={save}><label className="field-label" htmlFor="meeting-title">Meeting</label><Input id="meeting-title" autoFocus required value={title} onChange={(event) => setTitle(event.target.value)} placeholder="e.g. Weekly project review" /><label className="field-label" htmlFor="meeting-client">Client</label><Input id="meeting-client" value={client} onChange={(event) => setClient(event.target.value)} placeholder="Client or company" /><label className="field-label" htmlFor="meeting-project">Project</label><select id="meeting-project" value={projectId} onChange={(event) => { setProjectId(event.target.value); const picked = projects.find((item) => item.id === event.target.value); if (picked && !client.trim()) setClient(picked.client_name); if (picked) setKind("external"); }}><option value="">No project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><div className="form-split"><label className="field-label" htmlFor="meeting-start">Starts · IST<input id="meeting-start" type="datetime-local" required value={starts} onChange={(event) => setStarts(event.target.value)} /></label><label className="field-label" htmlFor="meeting-end">Ends · IST<input id="meeting-end" type="datetime-local" value={ends} onChange={(event) => setEnds(event.target.value)} /></label></div><label className="field-label" htmlFor="meeting-agenda">Agenda</label><Textarea id="meeting-agenda" value={agenda} onChange={(event) => setAgenda(event.target.value)} placeholder="Topics to cover" /><div className="form-split"><label className="field-label" htmlFor="meeting-kind">Type<select id="meeting-kind" value={kind} onChange={(event) => setKind(event.target.value as MeetingKind)}><option value="internal">Internal (team)</option><option value="external">External (client)</option></select></label><label className="field-label" htmlFor="meeting-links">Links<Textarea id="meeting-links" className="td-links" value={linksText} onChange={(event) => setLinksText(event.target.value)} placeholder="Join link, doc or ticket" /></label></div><label className="field-label" htmlFor="meeting-dossier">Pre-meeting dossier</label><Textarea id="meeting-dossier" value={dossier} onChange={(event) => setDossier(event.target.value)} placeholder="Client context, recent work, or questions" /><div className="modal-actions"><Button type="button" variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" disabled={saving || !title.trim() || !starts}>{saving ? <LoaderCircle size={15} className="spin" /> : <CalendarDays size={15} />} Save meeting</Button></div></form></ModalShell>;
 }
 
 function TaskModal({ userId, shiftId, projects, templates, defaultBucket, defaultProjectId, onClose, onSave }: { userId: string; shiftId: string | null; defaultProjectId: string; projects: Project[]; templates: WorkflowTemplate[]; defaultBucket: PlanBucket; onClose: () => void; onSave: (task: { title: string; description: string; project_id: string | null; planning_bucket: PlanBucket; planned_date: string | null; priority: TaskPriority; steps: string[]; shift_id: string | null }) => Promise<void> }) {
@@ -991,5 +1035,5 @@ function EvidenceDialog({ file, busy, onClose, onSave }: { file: File; busy: boo
 
 function AttachmentDialog({ attachment, busy, onClose, onSaveNote, onDelete }: { attachment: Attachment; busy: boolean; onClose: () => void; onSaveNote: (note: string) => void; onDelete: () => void }) {
   const [note, setNote] = useState(attachment.note);
-  return <ModalShell title={attachment.file_name} description="Private shift evidence. Signed previews expire; reopen the record to load a fresh one." onClose={onClose} className="attachment-modal">{attachment.previewUrl ? <div className="attachment-preview"><img src={attachment.previewUrl} alt={attachment.file_name} /></div> : <div className="attachment-unavailable"><FileImage size={23} /><span>Preview unavailable. Reload the page to request another private link.</span></div>}<label className="field-label" htmlFor="attachment-note">Note</label><Textarea id="attachment-note" value={note} onChange={(event) => setNote(event.target.value)} placeholder="What should this screenshot remind you of?" /><div className="modal-actions"><Button variant="ghost" onClick={onDelete} disabled={busy}><Trash2 size={14} /> Remove</Button><span /><Button variant="outline" onClick={onClose}>Close</Button><Button onClick={() => onSaveNote(note)} disabled={busy || note === attachment.note}>Save note</Button></div></ModalShell>;
+  return <ModalShell title={attachment.file_name} description="Private shift evidence. Signed previews expire; reopen the record to load a fresh one." onClose={onClose} className="attachment-modal">{attachment.previewUrl && attachment.content_type.startsWith("image/") ? <div className="attachment-preview"><img src={attachment.previewUrl} alt={attachment.file_name} /></div> : attachment.previewUrl ? <div className="attachment-unavailable"><FileImage size={23} /><span>{attachment.content_type || "File"}</span><a className="file-open" href={attachment.previewUrl} target="_blank" rel="noreferrer">Open file</a></div> : <div className="attachment-unavailable"><FileImage size={23} /><span>Preview unavailable. Reload the page to request another private link.</span></div>}<label className="field-label" htmlFor="attachment-note">Note</label><Textarea id="attachment-note" value={note} onChange={(event) => setNote(event.target.value)} placeholder="What is this? Add a note you can search for later" /><div className="modal-actions"><Button variant="ghost" onClick={onDelete} disabled={busy}><Trash2 size={14} /> Remove</Button><span /><Button variant="outline" onClick={onClose}>Close</Button><Button onClick={() => onSaveNote(note)} disabled={busy || note === attachment.note}>Save note</Button></div></ModalShell>;
 }

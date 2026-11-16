@@ -1,7 +1,7 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { PlanBucket, TaskPriority, TaskStatus } from "@/lib/tracker-types";
+import type { PlanBucket, TaskPriority } from "@/lib/tracker-types";
 
 export const BUCKET_OPTIONS: { id: PlanBucket; label: string }[] = [
   { id: "tonight", label: "Tonight" },
@@ -15,9 +15,6 @@ export const BUCKET_COPY: Record<PlanBucket, string> = {
   tonight: "Tonight", tomorrow: "Tomorrow", next_7_days: "Next 7 days", next_30_days: "Next 30 days", backlog: "Backlog",
 };
 
-export const PRIORITY_LABEL: Record<TaskPriority, string> = { high: "High", normal: "Medium", low: "Low" };
-export const STATUS_LABEL: Record<TaskStatus, string> = { queued: "Queued", in_progress: "Running", done: "Done", blocked: "Blocked" };
-export const BRAND_MARKS = ["project-tone-0", "project-tone-1", "project-tone-2", "project-tone-3"];
 
 export const TIMEZONES = [
   "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "America/Toronto",
@@ -66,12 +63,17 @@ export function PriorityChip({ priority }: { priority: TaskPriority }) {
 }
 
 export function ModalShell({ title, onClose, children, className = "" }: { title: string; description?: string; onClose: () => void; children: ReactNode; className?: string }) {
+  const backdrop = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const open = document.querySelectorAll(".modal-backdrop");
+      if (open[open.length - 1] === backdrop.current) onClose(); // only the top-most dialog closes
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className={`modal-panel ${className}`} role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><h2 id="modal-title">{title}</h2></div><Button variant="ghost" size="icon" aria-label="Close" onClick={onClose}><X size={17} /></Button></div>{children}</section></div>;
+  return <div ref={backdrop} className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className={`modal-panel ${className}`} role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><h2 id="modal-title">{title}</h2></div><Button variant="ghost" size="icon" aria-label="Close" onClick={onClose}><X size={17} /></Button></div>{children}</section></div>;
 }
 
 export function Empty({ icon, text, action }: { icon: ReactNode; text: string; action?: ReactNode }) {
