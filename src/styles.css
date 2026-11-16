@@ -1276,3 +1276,41 @@ details.advanced > summary { cursor: pointer; font-family: var(--font-label); fo
 details.advanced[open] > summary { margin-bottom: 8px; }
 details.advanced > * { margin-top: 8px; } details.advanced > summary { margin-top: 0; }
 .pref-group h3 { display: flex; align-items: center; gap: 6px; }
+.more-link { background: none; border: 0; color: var(--ns-accent); font-family: var(--font-label); font-size: 11px; letter-spacing: .06em; text-align: left; padding: 6px 2px 0; }
+.more-link:hover { text-decoration: underline; }
+
+/* ===== bug fixes from the full test pass ===== */
+/* long text never pushes controls out of a card */
+.task-title-area { min-width: 0; }
+.task-title, .board-card-top strong, .inbox-item strong, .agenda-body strong, .row-title { overflow-wrap: anywhere; }
+.task-title { white-space: normal; }
+.task-card, .board-card, .card, .agenda-item { min-width: 0; }
+.agenda-head small { font-family: var(--font-label); font-weight: 400; font-size: 10px; letter-spacing: .1em; color: var(--ns-muted); margin-left: 6px; }
+.dash-grid > *, .dash-col > * { min-width: 0; }
+
+/* phone and small tablet: nothing may sit off-screen */
+@media (max-width: 900px) {
+  .app-frame { grid-template-rows: auto minmax(0, 1fr); }
+  .topnav { display: flex; flex-wrap: wrap; height: auto; padding: 8px 12px; gap: 8px 10px; align-items: center; }
+  .nav-brand { order: 1; } .nav-wordmark { display: none; }
+  .nav-right { order: 2; margin-left: auto; gap: 6px; }
+  .nav-tabs { order: 3; width: 100%; overflow-x: auto; flex-wrap: nowrap; gap: 4px; padding-bottom: 2px; scrollbar-width: none; justify-self: stretch; }
+  .nav-tabs::-webkit-scrollbar { display: none; }
+  .nav-item { flex: none; padding: 8px 12px; font-size: 11px; letter-spacing: .08em; }
+  .clock-zone, .account-label { display: none; }
+  .clock-btn { padding: 6px 9px; }
+  .popover { position: fixed; left: 8px; right: 8px; top: 96px; width: auto; }
+  .clock-pop { width: auto; }
+  .content-wrap, .content-wrap.dash { padding: 10px 12px 14px; overflow-y: auto; }
+  .dash-grid, .split, .planner-cols, .board, .archive-layout, .detail-grid, .replay-grid { grid-template-columns: minmax(0, 1fr); flex: none; min-height: auto; }
+  .dash-col, .archive-side, .archive-main, .list-pane, .detail-pane, .card-tasks { max-height: none; overflow: visible; }
+  .stat-row, .stat-row-4, .stat-row-5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat-tile.tile-wide { grid-column: 1 / -1; }
+  .page-head, .dash-head { flex-direction: column; align-items: stretch; }
+  .dash-head-actions, .page-actions { flex-wrap: wrap; }
+  .toolbar { flex-wrap: wrap; } .toolbar .search-field { max-width: none; min-width: 0; flex: 1 1 100%; }
+  .agenda-item { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .replay-head { grid-auto-flow: row; gap: 8px; }
+  .quick-bar { flex-wrap: wrap; } .quick-bar input { flex: 1 1 100%; }
+  .modal-panel { max-height: calc(100vh - 24px); }
+}

@@ -12,8 +12,8 @@ import type { PlanBucket, Project, Task, TaskPriority, WorkflowTemplate } from "
 
 const weight: Record<TaskPriority, number> = { high: 0, normal: 1, low: 2 };
 
-export function PlanBoard({ userId, projects, tasks, templates, now, activeClientId, busy, onRun, onEditTask }: {
-  userId: string; projects: Project[]; tasks: Task[]; templates: WorkflowTemplate[]; now: Date; activeClientId: string; busy: boolean;
+export function PlanBoard({ userId, allProjects, projects, tasks, templates, now, activeClientId, busy, onRun, onEditTask }: {
+  userId: string; allProjects: Project[]; projects: Project[]; tasks: Task[]; templates: WorkflowTemplate[]; now: Date; activeClientId: string; busy: boolean;
   onRun: (action: () => Promise<unknown>, text?: string) => Promise<void>; onEditTask: (task: Task) => void;
 }) {
   const [text, setText] = useState("");
@@ -86,7 +86,7 @@ export function PlanBoard({ userId, projects, tasks, templates, now, activeClien
       return <section key={column.id} className={`board-col${over === column.id ? " over" : ""}`} onDragOver={(event) => { event.preventDefault(); setOver(column.id); }} onDragLeave={() => setOver((current) => current === column.id ? null : current)} onDrop={(event) => { event.preventDefault(); setOver(null); const id = event.dataTransfer.getData("text/plain") || dragId; setDragId(null); if (id) void move(id, column.id); }}>
         <header className="board-head"><h2>{column.label}</h2><span className="count-badge">{list.length}</span>{list.some((task) => task.priority === "high") ? <span className="chip warn small">{list.filter((task) => task.priority === "high").length} high</span> : null}</header>
         <div className="board-list">{list.length ? list.map((task) => {
-          const owner = projects.find((item) => item.id === task.project_id);
+          const owner = allProjects.find((item) => item.id === task.project_id);
           return <article key={task.id} className={`board-card${dragId === task.id ? " dragging" : ""}`} draggable onDragStart={(event) => onDragStart(event, task)} onDragEnd={() => { setDragId(null); setOver(null); }}>
             <div className="board-card-top"><GripVertical size={13} className="grip" /><strong>{task.title}</strong><button className="icon-mini" aria-label={`Edit ${task.title}`} onClick={() => onEditTask(task)}><Pencil size={13} /></button></div>
             <div className="board-card-meta"><span className="project-tag">{owner?.name ?? "No project"}</span><PriorityChip priority={task.priority} />{task.status === "blocked" ? <span className="chip warn small">BLOCKED</span> : null}{task.steps.length ? <small><ListChecks size={11} /> {task.steps.filter((step) => step.completed).length}/{task.steps.length}</small> : null}{totalSeconds(task, now) > 0 ? <small>{shortDuration(totalSeconds(task, now))}</small> : null}</div>

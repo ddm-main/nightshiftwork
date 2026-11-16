@@ -94,7 +94,8 @@ export function getShiftDateKey(date: Date): string {
 }
 
 export function getNextShiftDate(date: Date): Date {
-  const parts = getIndiaTimeParts(date);
+  // Anchor on the shift this moment belongs to, so 1:00 AM Tuesday (Monday's shift) rolls to Tuesday evening, not Wednesday.
+  const parts = getIndiaTimeParts(getShiftStart(date));
   const next = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + 1));
   while (next.getUTCDay() === 0 || next.getUTCDay() === 6) next.setUTCDate(next.getUTCDate() + 1);
   return fromIndiaTime({
@@ -146,4 +147,12 @@ export function nextGapChange(date: Date, clientZone: string, lookAheadDays = 21
     if (to !== from) return { inDays: day, from, to };
   }
   return null;
+}
+
+/**
+ * During the handover window (3:30 AM until the next countdown) the shift that just ended is still the one being
+ * reported on, so everything that belongs to "this shift" is anchored three hours back instead of rolling forward.
+ */
+export function getReportingAnchor(date: Date): Date {
+  return getShiftState(date) === "after" ? new Date(date.getTime() - 3 * 3_600_000) : date;
 }

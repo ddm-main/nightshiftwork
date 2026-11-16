@@ -40,8 +40,24 @@ export function timeLeftUntil(target: Date, now: Date) {
   return `${String(Math.floor(seconds / 3600)).padStart(2, "0")}h ${String(Math.floor((seconds % 3600) / 60)).padStart(2, "0")}m`;
 }
 
+// Intl prints "GMT+1" for many European zones; show the abbreviations people actually use.
+const NAMED_ZONES: Record<string, { std: number; names: [string, string] }> = {
+  "Europe/Berlin": { std: 60, names: ["CET", "CEST"] }, "Europe/Paris": { std: 60, names: ["CET", "CEST"] }, "Europe/Madrid": { std: 60, names: ["CET", "CEST"] },
+  "Europe/Rome": { std: 60, names: ["CET", "CEST"] }, "Europe/Amsterdam": { std: 60, names: ["CET", "CEST"] }, "Europe/Warsaw": { std: 60, names: ["CET", "CEST"] },
+  "Europe/London": { std: 0, names: ["GMT", "BST"] }, "Australia/Sydney": { std: 600, names: ["AEST", "AEDT"] },
+};
+const FIXED_ZONES: Record<string, string> = { "Asia/Dubai": "GST", "Asia/Singapore": "SGT", "Asia/Tokyo": "JST", "Asia/Shanghai": "CST" };
+
 export function zoneAbbr(date: Date, timeZone: string) {
   if (timeZone === "Asia/Kolkata") return "IST";
+  if (FIXED_ZONES[timeZone]) return FIXED_ZONES[timeZone]!;
+  const named = NAMED_ZONES[timeZone];
+  if (named) {
+    const raw = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "shortOffset" }).formatToParts(date).find((part) => part.type === "timeZoneName")?.value ?? "GMT";
+    const match = raw.match(/GMT([+-])(\d+)(?::(\d+))?/);
+    const offset = match ? (match[1] === "-" ? -1 : 1) * (Number(match[2]) * 60 + Number(match[3] ?? 0)) : 0;
+    return offset > named.std ? named.names[1] : named.names[0];
+  }
   return new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "short" }).formatToParts(date).find((part) => part.type === "timeZoneName")?.value ?? timeZone;
 }
 

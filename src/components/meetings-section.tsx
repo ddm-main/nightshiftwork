@@ -5,10 +5,10 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Empty, ModalShell, zoneAbbr } from "@/components/ui-kit";
 import { extractActionItems } from "@/lib/actions";
-import { formatClock, isoToIstDateTimeInput, istDateTimeInputToIso } from "@/lib/night-shift";
+import { formatClock, getShiftDateKey, getShiftState, isoToIstDateTimeInput, istDateTimeInputToIso } from "@/lib/night-shift";
+import { toast } from "sonner";
 import type { Meeting, Project } from "@/lib/tracker-types";
 
-const istDay = (date: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(date);
 const dayLabel = (key: string) => new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "long", month: "short", day: "numeric" }).format(new Date(`${key}T12:00:00Z`));
 
 function countdown(start: Date, end: Date | null, now: Date) {
@@ -17,7 +17,7 @@ function countdown(start: Date, end: Date | null, now: Date) {
   if (mins < 0) return { text: "Ended", tone: "past" };
   if (mins < 60) return { text: `In ${Math.max(1, mins)}m`, tone: mins <= 30 ? "soon" : "later" };
   if (mins < 24 * 60) return { text: `In ${Math.floor(mins / 60)}h ${mins % 60}m`, tone: "later" };
-  return { text: `In ${Math.floor(mins / 1440)}d`, tone: "later" };
+  return { text: `In ${Math.floor(mins / 1440)}d ${Math.floor((mins % 1440) / 60)}h`, tone: "later" };
 }
 
 export function MeetingsSection({ meetings, projects, now, tz, onOpen, onAdd, onImport, onTasks, outlookConnected, outlookSyncing, onOutlook }: {
@@ -44,7 +44,7 @@ export function MeetingsSection({ meetings, projects, now, tz, onOpen, onAdd, on
 
   const groups = new Map<string, Meeting[]>();
   for (const meeting of visible) {
-    const key = istDay(new Date(meeting.starts_at));
+    const key = getShiftDateKey(new Date(meeting.starts_at)); // group by the night shift a meeting belongs to, not the calendar day
     groups.set(key, [...(groups.get(key) ?? []), meeting]);
   }
 
@@ -70,15 +70,16 @@ export function MeetingsSection({ meetings, projects, now, tz, onOpen, onAdd, on
     </div>
     <div className="agenda">
       {groups.size ? [...groups.entries()].map(([key, list]) => <section className="agenda-day" key={key}>
-        <header className="agenda-head"><h2>{dayLabel(key)}</h2><span className="count-badge">{list.length}</span></header>
+        <header className="agenda-head"><h2>{dayLabel(key)} <small>shift</small></h2><span className="count-badge">{list.length}</span></header>
         <div className="agenda-list">{list.map((meeting) => {
           const start = new Date(meeting.starts_at); const end = meeting.ends_at ? new Date(meeting.ends_at) : null;
           const status = countdown(start, end, now);
-          const minutes = end ? Math.round((end.getTime() - start.getTime()) / 60_000) : null;
+          const minutes = end && end > start ? Math.round((end.getTime() - start.getTime()) / 60_000) : null;
           const project = projects.find((item) => item.id === meeting.project_id);
+          const zone = project?.timezone ?? tz;
           return <article className="agenda-item" key={meeting.id} role="button" tabIndex={0} onClick={() => onOpen(meeting)} onKeyDown={(event) => { if (event.key === "Enter") onOpen(meeting); }}>
-            <div className="agenda-time"><strong>{formatClock(start, tz)}</strong><small>{zoneAbbr(start, tz)} · {formatClock(start, "Asia/Kolkata")} IST</small></div>
-            <div className="agenda-body"><strong>{meeting.title}</strong><span>{[project?.name, meeting.client_name, minutes ? `${minutes} min` : null].filter(Boolean).join(" · ") || "No client set"}</span>{meeting.action_items.length ? <small className="agenda-actions"><ListChecks size={12} /> {meeting.action_items.length} action item{meeting.action_items.length === 1 ? "" : "s"}</small> : null}</div>
+            <div className="agenda-time"><strong>{formatClock(start, zone)}</strong><small>{zoneAbbr(start, zone)} · {formatClock(start, "Asia/Kolkata")} IST</small></div>
+            <div className="agenda-body"><strong>{meeting.title}</strong><span>{[project?.name, meeting.client_name, minutes ? `${minutes} min` : null, getShiftState(start) === "active" ? null : "outside shift hours"].filter(Boolean).join(" · ") || "No client set"}</span>{meeting.action_items.length ? <small className="agenda-actions"><ListChecks size={12} /> {meeting.action_items.length} action item{meeting.action_items.length === 1 ? "" : "s"}</small> : null}</div>
             <span className={`chip when ${status.tone}`}>{status.text}</span>
             {meeting.action_items.length ? <Button variant="outline" size="sm" onClick={(event) => { event.stopPropagation(); onTasks(meeting); }}>→ Tasks</Button> : null}
           </article>;
@@ -108,6 +109,7 @@ export function MeetingDialog({ meeting, projects, tz, onClose, onSave, onDelete
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!title.trim() || !starts) return;
+    if (ends && istDateTimeInputToIso(ends) <= istDateTimeInputToIso(starts)) { toast.error("The meeting must end after it starts."); return; }
     await onSave({ title: title.trim(), project_id: projectId || null, client_name: client.trim(), starts_at: istDateTimeInputToIso(starts), ends_at: ends ? istDateTimeInputToIso(ends) : null, dossier, notes, action_items: items });
     onClose();
   };
