@@ -121,3 +121,21 @@ describe("handover window anchors to the shift that just ended", () => {
     expect(getShiftDateKey(getReportingAnchor(ist("2026-11-17T09:00:00")))).toBe("2026-11-17");
   });
 });
+
+import { tasksDueTonight } from "@/lib/plan";
+import type { Task } from "@/lib/tracker-types";
+
+describe("tasks that come due", () => {
+  const t = (over: Partial<Task>) => ({ id: "x", status: "queued", planning_bucket: "tomorrow", planned_date: null, ...over }) as Task;
+  it("moves yesterday's Tomorrow tasks and last night's open Tonight tasks, but not done or future ones", () => {
+    const list = [
+      t({ id: "a", planning_bucket: "tomorrow", planned_date: "2026-11-17" }),
+      t({ id: "b", planning_bucket: "tomorrow", planned_date: "2026-11-18" }),
+      t({ id: "c", planning_bucket: "tonight", planned_date: "2026-11-16" }),
+      t({ id: "d", planning_bucket: "tonight", planned_date: "2026-11-17" }),
+      t({ id: "e", planning_bucket: "tonight", planned_date: "2026-11-16", status: "done" }),
+      t({ id: "f", planning_bucket: "backlog", planned_date: null }),
+    ];
+    expect(tasksDueTonight(list, "2026-11-17").map((task) => task.id)).toEqual(["a", "c"]);
+  });
+});

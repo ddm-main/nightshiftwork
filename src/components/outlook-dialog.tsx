@@ -8,8 +8,8 @@ import { validateCalendarUrl } from "@/lib/calendar-url";
 
 const PORTAL = "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/CreateApplicationBlade/isMSAApp~/false";
 
-export function OutlookDialog({ icsUrl, onIcsUrl, onSaveIcs, onRemoveIcs, onImportEml, clientId, onClientId, account, connected, redirectUris, syncing, lastSync, onConnect, onDisconnect, onSync, onClose }: {
-  icsUrl: string; onIcsUrl: (url: string) => void; onSaveIcs: () => void; onRemoveIcs: () => void; onImportEml: (files: File[]) => void;
+export function OutlookDialog({ busyOnly, icsUrl, onIcsUrl, onSaveIcs, onRemoveIcs, onImportEml, clientId, onClientId, account, connected, redirectUris, syncing, lastSync, onConnect, onDisconnect, onSync, onClose }: {
+  busyOnly: boolean; icsUrl: string; onIcsUrl: (url: string) => void; onSaveIcs: () => void; onRemoveIcs: () => void; onImportEml: (files: File[]) => void;
   clientId: string; onClientId: (id: string) => void; account: string | null; connected: boolean; redirectUris: string[];
   syncing: boolean; lastSync: Date | null; onConnect: () => void; onDisconnect: () => void; onSync: () => void; onClose: () => void;
 }) {
@@ -31,6 +31,7 @@ export function OutlookDialog({ icsUrl, onIcsUrl, onSaveIcs, onRemoveIcs, onImpo
           <li>Paste it here. Your meetings (including recurring ones) sync every 15 minutes.</li>
         </ol>
         <Input aria-label="Published calendar link" value={icsUrl} onChange={(event) => onIcsUrl(event.target.value)} placeholder="https://outlook.office365.com/owa/calendar/…/reachcalendar.ics" spellCheck={false} />
+        {busyOnly ? <p className="field-helper warn-note">Your published calendar only shares “Busy”, so meeting titles are hidden. In Outlook choose <em>Can view all details</em> when publishing, then paste the new link here.</p> : null}
         {icsUrl.trim() && !linkOk ? <p className="field-helper warn-note">That does not look like an Outlook calendar link (it should start with https://outlook.office365.com or outlook.live.com).</p> : null}
         <div className="outlook-actions">
           <Button onClick={onSaveIcs} disabled={!linkOk || syncing}><RefreshCw size={14} className={syncing ? "spin" : ""} /> {linked ? "Save & sync" : "Save link"}</Button>

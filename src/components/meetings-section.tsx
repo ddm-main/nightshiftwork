@@ -21,8 +21,8 @@ function countdown(start: Date, end: Date | null, now: Date) {
   return { text: `In ${Math.floor(mins / 1440)}d ${Math.floor((mins % 1440) / 60)}h`, tone: "later" };
 }
 
-export function MeetingsSection({ meetings, projects, now, tz, onOpen, onAdd, onImport, onTasks, outlookConnected, outlookSyncing, onOutlook }: {
-  meetings: Meeting[]; projects: Project[]; now: Date; tz: string; outlookConnected: boolean; outlookSyncing: boolean; onOutlook: () => void;
+export function MeetingsSection({ meetings, projects, now, tz, onOpen, onAdd, onImport, onTasks, outlookConnected, outlookSyncing, onOutlook, busyOnly, onOutlookSetup }: {
+  meetings: Meeting[]; projects: Project[]; now: Date; tz: string; outlookConnected: boolean; outlookSyncing: boolean; onOutlook: () => void; busyOnly: boolean; onOutlookSetup: () => void;
   onOpen: (meeting: Meeting) => void; onAdd: () => void; onImport: (file: File) => void; onTasks: (meeting: Meeting) => void;
 }) {
   const [tab, setTab] = useState<"upcoming" | "past" | "all">("upcoming");
@@ -61,6 +61,7 @@ export function MeetingsSection({ meetings, projects, now, tz, onOpen, onAdd, on
         <Button className="primary-action" size="sm" onClick={onAdd}><Plus size={14} /> Meeting</Button>
       </div>
     </div>
+    {busyOnly ? <div className="banner warn"><span>Your Outlook calendar is shared as “Busy” only, so meeting titles show as Busy.</span><Button size="sm" variant="outline" onClick={onOutlookSetup}>Fix publish setting</Button></div> : null}
     <div className="stat-row stat-row-4">
       <div className="stat-tile"><span className="stat-label">Upcoming</span><strong className="stat-value tone-cyan">{upcoming.length}</strong><small>{weekAhead} in the next 7 days</small></div>
       <div className="stat-tile"><span className="stat-label">Past</span><strong className="stat-value">{past.length}</strong><small>{missingNotes} without notes</small></div>
